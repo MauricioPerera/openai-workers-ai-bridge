@@ -1,3 +1,7 @@
+export interface RateLimiter {
+  limit(input: { key: string }): Promise<{ success: boolean }>;
+}
+
 export interface Env {
   AI: Ai;
   DEFAULT_CHAT_MODEL?: string;
@@ -8,6 +12,10 @@ export interface Env {
   // to ignore tool definitions in some Hono-routed contexts (Hermes, Llama 70B).
   CLOUDFLARE_TOKEN?: string;
   CLOUDFLARE_ACCOUNT_ID?: string;
+  // Optional Cloudflare Rate Limiting binding. When configured in wrangler.toml,
+  // /v1/* requests are throttled per-API-key (or per-IP if no auth). Skipped
+  // when absent so the template still deploys without extra setup.
+  RATE_LIMITER?: RateLimiter;
 }
 
 export interface ChatMessage {

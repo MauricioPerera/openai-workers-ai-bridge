@@ -32,22 +32,51 @@ function safeEqual(a: string, b: string): boolean {
 // Bearer-token auth. Skipped only when API_KEY is not configured (open mode).
 app.use("/v1/*", async (c, next) => {
   const expected = c.env.API_KEY;
-  if (!expected) return next();
-
-  const header = c.req.header("Authorization") ?? "";
-  const provided = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
-  if (!safeEqual(provided, expected)) {
-    return c.json(
-      {
-        error: {
-          message: "Invalid or missing API key. Send `Authorization: Bearer <API_KEY>`.",
-          type: "invalid_request_error",
-          code: "invalid_api_key",
+  if (expected) {
+    const header = c.req.header("Authorization") ?? "";
+    const provided = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
+    if (!safeEqual(provided, expected)) {
+      return c.json(
+        {
+          error: {
+            message: "Invalid or missing API key. Send `Authorization: Bearer <API_KEY>`.",
+            type: "invalid_request_error",
+            code: "invalid_api_key",
+          },
         },
-      },
-      401,
-    );
+        401,
+      );
+    }
   }
+
+  // Optional Cloudflare Rate Limiting (only active if the binding exists).
+  // Key by bearer-token suffix when present, otherwise by client IP. The
+  // binding's actual limit + period live in wrangler.toml.
+  const limiter = c.env.RATE_LIMITER;
+  if (limiter) {
+    const header = c.req.header("Authorization") ?? "";
+    const tokenKey = header.startsWith("Bearer ") ? header.slice(-12) : "";
+    const ip = c.req.header("cf-connecting-ip") ?? c.req.header("x-forwarded-for") ?? "anon";
+    const key = tokenKey || ip;
+    try {
+      const { success } = await limiter.limit({ key });
+      if (!success) {
+        return c.json(
+          {
+            error: {
+              message: "Rate limit exceeded. Slow down or contact the bridge operator.",
+              type: "rate_limit_exceeded",
+              code: "rate_limit_exceeded",
+            },
+          },
+          429,
+        );
+      }
+    } catch {
+      // Binding misconfigured — fail open rather than locking everyone out.
+    }
+  }
+
   return next();
 });
 
