@@ -65,6 +65,18 @@ function generateId(): string {
   return "chatcmpl-" + crypto.randomUUID().replace(/-/g, "").slice(0, 24);
 }
 
+// DeepSeek-R1 distill emits <think>...</think> reasoning before the final
+// answer. OpenAI o1 clients don't expect it (reasoning is a separate field
+// for them). We split it off and forward it as `reasoning_content` —
+// LangChain / LibreChat / OpenAI SDK ≥ 4.0 will pick it up if they care,
+// otherwise it's a non-disruptive extra field.
+function splitReasoning(raw: string): { content: string; reasoning?: string } {
+  if (!raw) return { content: raw };
+  const match = raw.match(/^\s*<think>([\s\S]*?)<\/think>\s*([\s\S]*)$/);
+  if (!match) return { content: raw };
+  return { content: match[2].trim(), reasoning: match[1].trim() };
+}
+
 export async function handleChatCompletions(c: Context<{ Bindings: Env }>) {
   let body: ChatCompletionRequest;
   try {
@@ -130,10 +142,11 @@ export async function handleChatCompletions(c: Context<{ Bindings: Env }>) {
     //   - OpenAI-native (IBM Granite, DeepSeek-R1, newer models):
     //       { choices: [{ message: { content, tool_calls } , finish_reason }], usage }
     const nativeChoice = Array.isArray(result?.choices) ? result.choices[0] : null;
-    const text: string = nativeChoice?.message?.content
+    const rawText: string = nativeChoice?.message?.content
       ?? (typeof result?.response === "string" ? result.response : null)
       ?? (typeof result?.result?.response === "string" ? result.result.response : null)
       ?? "";
+    const { content: text, reasoning } = splitReasoning(rawText);
     const toolCalls = nativeChoice?.message?.tool_calls?.length
       ? nativeChoice.message.tool_calls
       : (result?.tool_calls?.length ? result.tool_calls : undefined);
@@ -151,6 +164,7 @@ export async function handleChatCompletions(c: Context<{ Bindings: Env }>) {
           message: {
             role: "assistant",
             content: toolCalls ? null : text,
+            ...(reasoning ? { reasoning_content: reasoning } : {}),
             ...(toolCalls ? { tool_calls: toolCalls } : {}),
           },
           finish_reason: finishReason,

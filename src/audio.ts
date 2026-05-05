@@ -25,7 +25,10 @@ function toBase64(buffer: ArrayBuffer): string {
   return btoa(binary);
 }
 
-export async function handleTranscriptions(c: Context<{ Bindings: Env }>) {
+async function handleWhisper(
+  c: Context<{ Bindings: Env }>,
+  task: "transcribe" | "translate",
+) {
   let form: FormData;
   try {
     form = await c.req.formData();
@@ -44,14 +47,24 @@ export async function handleTranscriptions(c: Context<{ Bindings: Env }>) {
   const requestedModel = (form.get("model") as string | null) ?? undefined;
   const responseFormat = (form.get("response_format") as string | null) ?? "json";
   const language = (form.get("language") as string | null) ?? undefined;
-  const model = resolveWhisperModel(requestedModel);
+  // Whisper translate task only works on whisper-large-v3-turbo, not the
+  // original whisper-1 model. Force the large variant when translating.
+  const model =
+    task === "translate"
+      ? resolveWhisperModel(requestedModel?.includes("large") ? requestedModel : "whisper-large-v3")
+      : resolveWhisperModel(requestedModel);
 
   const buffer = await file.arrayBuffer();
 
   // The two Whisper variants on Workers AI take different inputs: the original
   // model wants a byte array, the large-v3-turbo wants base64.
   const aiInput: Record<string, unknown> = model.includes("whisper-large-v3")
-    ? { audio: toBase64(buffer), task: "transcribe", ...(language ? { source_lang: language } : {}) }
+    ? {
+        audio: toBase64(buffer),
+        task,
+        ...(language ? { source_lang: language } : {}),
+        ...(task === "translate" ? { target_lang: "en" } : {}),
+      }
     : { audio: [...new Uint8Array(buffer)] };
 
   let result: any;
@@ -74,7 +87,7 @@ export async function handleTranscriptions(c: Context<{ Bindings: Env }>) {
   }
   if (responseFormat === "verbose_json") {
     return c.json({
-      task: "transcribe",
+      task,
       language: language ?? "unknown",
       duration: result?.duration ?? 0,
       text,
@@ -82,6 +95,13 @@ export async function handleTranscriptions(c: Context<{ Bindings: Env }>) {
     });
   }
 
-  // Default: json
   return c.json({ text });
+}
+
+export async function handleTranscriptions(c: Context<{ Bindings: Env }>) {
+  return handleWhisper(c, "transcribe");
+}
+
+export async function handleTranslations(c: Context<{ Bindings: Env }>) {
+  return handleWhisper(c, "translate");
 }

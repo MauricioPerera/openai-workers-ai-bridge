@@ -1,10 +1,11 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { handleTranscriptions } from "./audio";
+import { handleTranscriptions, handleTranslations } from "./audio";
 import { handleChatCompletions } from "./chat";
 import { handleEmbeddings } from "./embeddings";
 import { handleListModels, handleRetrieveModel } from "./models";
 import { handleImages } from "./images";
+import { handleModerations } from "./moderations";
 import { handleResponses } from "./responses";
 import { handleSpeech } from "./speech";
 import type { Env } from "./types";
@@ -60,8 +61,10 @@ app.get("/", (c) =>
       "/v1/responses",
       "/v1/embeddings",
       "/v1/audio/transcriptions",
+      "/v1/audio/translations",
       "/v1/audio/speech",
       "/v1/images/generations",
+      "/v1/moderations",
     ],
     auth: c.env.API_KEY ? "bearer-token" : "open (set API_KEY secret to enable auth)",
   }),
@@ -73,8 +76,10 @@ app.post("/v1/chat/completions", handleChatCompletions);
 app.post("/v1/responses", handleResponses);
 app.post("/v1/embeddings", handleEmbeddings);
 app.post("/v1/audio/transcriptions", handleTranscriptions);
+app.post("/v1/audio/translations", handleTranslations);
 app.post("/v1/audio/speech", handleSpeech);
 app.post("/v1/images/generations", handleImages);
+app.post("/v1/moderations", handleModerations);
 
 app.notFound((c) =>
   c.json({ error: { message: `No route for ${c.req.method} ${c.req.path}`, type: "not_found" } }, 404),

@@ -286,10 +286,14 @@ export async function handleResponses(c: Context<{ Bindings: Env }>) {
     // Same dual-shape handling as chat.ts: legacy `response` field vs.
     // OpenAI-native `choices[].message.content` (Granite, DeepSeek-R1, ...).
     const nativeChoice = Array.isArray(result?.choices) ? result.choices[0] : null;
-    const text: string = nativeChoice?.message?.content
+    const rawText: string = nativeChoice?.message?.content
       ?? (typeof result?.response === "string" ? result.response : null)
       ?? (typeof result?.result?.response === "string" ? result.result.response : null)
       ?? "";
+    // Split off DeepSeek-R1 <think>...</think> reasoning if present.
+    const thinkMatch = rawText.match(/^\s*<think>([\s\S]*?)<\/think>\s*([\s\S]*)$/);
+    const text = thinkMatch ? thinkMatch[2].trim() : rawText;
+    const reasoning = thinkMatch ? thinkMatch[1].trim() : null;
     const inputTokens = result?.usage?.prompt_tokens ?? 0;
     const outputTokens = result?.usage?.completion_tokens ?? 0;
     const toolCalls = nativeChoice?.message?.tool_calls?.length
@@ -297,6 +301,15 @@ export async function handleResponses(c: Context<{ Bindings: Env }>) {
       : (Array.isArray(result?.tool_calls) && result.tool_calls.length ? result.tool_calls : null);
 
     const output: unknown[] = [];
+    // Reasoning items come first in OpenAI's o-series response shape.
+    if (reasoning) {
+      output.push({
+        type: "reasoning",
+        id: "rs_" + crypto.randomUUID().replace(/-/g, "").slice(0, 24),
+        summary: [],
+        content: [{ type: "reasoning_text", text: reasoning }],
+      });
+    }
     if (text) {
       output.push({
         type: "message",
