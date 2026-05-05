@@ -13,8 +13,10 @@ Drop-in OpenAI-compatible API for **Cloudflare Workers AI**. Deploy this Worker 
 | `POST /v1/responses` | ✅ | OpenAI's newer Responses API. Streaming + non-streaming. Multi-turn agent loops with `function_call` / `function_call_output` items. Used by recent n8n / LangChain.js / OpenAI SDK helpers. |
 | `POST /v1/embeddings` | ✅ | Single string or array. Returns OpenAI shape. *Dimensions differ from OpenAI — see below.* |
 | `POST /v1/audio/transcriptions` | ✅ | Multipart upload → Whisper (`@cf/openai/whisper` or `whisper-large-v3-turbo`). Supports `json`, `text`, `verbose_json`, `vtt`. |
+| `POST /v1/audio/translations` | ✅ | Same shape as transcriptions, but returns English regardless of source language (Whisper translate task on `whisper-large-v3-turbo`). |
 | `POST /v1/audio/speech` | ✅ | TTS via `@cf/myshell-ai/melotts` (multilingual, WAV) or `@cf/deepgram/aura-1` (English, MP3). |
 | `POST /v1/images/generations` | ✅ | Flux schnell, SDXL Lightning, Dreamshaper. Returns `b64_json` or a `data:` URL. |
+| `POST /v1/moderations` | ✅ | `@cf/meta/llama-guard-3-8b`. S1-S14 hazard categories mapped onto OpenAI's `categories` shape. |
 
 Any model id starting with `@<provider>/` (e.g. `@cf/...`, `@hf/...`) is forwarded to Workers AI verbatim, so you can target every model your account has access to without waiting for an alias.
 
@@ -29,6 +31,9 @@ Any model id starting with `@<provider>/` (e.g. `@cf/...`, `@hf/...`) is forward
 - **Remote image URLs are auto-inlined.** Workers AI vision models reject `https://` URLs and require `data:` URIs. The bridge fetches the URL (with a User-Agent so Wikipedia / GitHub user-content don't 400), validates content-type, caps at 10 MB, and sends the base64 data URI upstream.
 - **Optional REST API path.** The `env.AI` binding has been observed to behave inconsistently for tool calling depending on the calling context. Setting `CLOUDFLARE_TOKEN` + `CLOUDFLARE_ACCOUNT_ID` as Worker secrets switches the bridge to the public REST endpoint, which has been more reliable. The binding remains the default when no token is configured.
 - **Constant-time API key compare.** Cheap and free — no reason to be timing-channel sleepy on bearer auth.
+- **DeepSeek-R1 / QwQ reasoning split.** R1 emits `<think>...</think>` blocks before the answer. The bridge splits them off into `message.reasoning_content` (chat.completions) or a `{type:"reasoning"}` output item (Responses API), so o-series clients see clean answers without surprise reasoning leaking into UI.
+- **Embeddings cache.** SHA-256 of `(model, text)` keyed against the edge Cache API for a week. RAG pipelines that repeat queries pay neurons once; the second call returns the same vector for free.
+- **Optional rate limiting.** Add a `[[unsafe.bindings]]` ratelimit binding in `wrangler.toml` and `/v1/*` is throttled per-API-key (or per-IP). Without the binding, no rate limiting — the deploy template still works.
 
 ## Deploy
 
@@ -192,16 +197,17 @@ Set vars in `wrangler.toml` (or the Cloudflare dashboard); set secrets with `wra
 
 ```
 src/
-├── index.ts             Hono router, CORS, bearer auth (constant-time)
+├── index.ts             Hono router, CORS, bearer auth (constant-time), optional rate limit
 ├── ai-client.ts         Workers AI client — REST API or binding fallback
-├── chat.ts              /v1/chat/completions (stream + non-stream + tools + vision)
-├── responses.ts         /v1/responses (stream + non-stream + tools + multi-turn)
-├── embeddings.ts        /v1/embeddings
-├── audio.ts             /v1/audio/transcriptions
+├── chat.ts              /v1/chat/completions (stream + non-stream + tools + vision + reasoning)
+├── responses.ts         /v1/responses (stream + non-stream + tools + multi-turn + reasoning)
+├── embeddings.ts        /v1/embeddings (with edge cache)
+├── audio.ts             /v1/audio/transcriptions, /v1/audio/translations
 ├── speech.ts            /v1/audio/speech
 ├── images.ts            /v1/images/generations
+├── moderations.ts       /v1/moderations (Llama Guard 3 → OpenAI categories)
 ├── models.ts            /v1/models, /v1/models/:id
-├── mapping.ts           OpenAI → Workers AI model alias tables + vision detection
+├── mapping.ts           OpenAI → Workers AI alias table + vision/reasoning detection
 ├── tool-call-parser.ts  Streaming <tool_call>...</tool_call> parser (Hermes/Mistral)
 ├── image-inline.ts      Auto-fetch and base64-inline remote image URLs
 └── types.ts             Shared types
