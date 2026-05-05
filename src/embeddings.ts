@@ -78,6 +78,21 @@ export async function handleEmbeddings(c: Context<{ Bindings: Env }>) {
   if (inputs.some((s) => typeof s !== "string")) {
     return c.json({ error: { message: "`input` must be string or string[]", type: "invalid_request_error" } }, 400);
   }
+  // Workers AI embedding endpoints accept large batches but the practical
+  // cap before the request times out is around a few hundred inputs. Reject
+  // explicitly so callers get a clean error rather than a truncated result.
+  const BATCH_CAP = 256;
+  if (inputs.length > BATCH_CAP) {
+    return c.json(
+      {
+        error: {
+          message: `\`input\` array length ${inputs.length} exceeds the per-request cap of ${BATCH_CAP}. Split into multiple calls.`,
+          type: "invalid_request_error",
+        },
+      },
+      400,
+    );
+  }
 
   const model = resolveEmbeddingModel(body.model, c.env.DEFAULT_EMBEDDING_MODEL ?? "@cf/baai/bge-m3");
 

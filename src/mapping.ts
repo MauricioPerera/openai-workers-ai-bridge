@@ -26,6 +26,11 @@ const CHAT_ALIASES: Record<string, string> = {
 
   // Code-specialised
   "gpt-4o-code": "@cf/qwen/qwen2.5-coder-32b-instruct",
+
+  // Multimodal + reasoning + tools (Google Gemma 4)
+  "gemma-4": "@cf/google/gemma-4-26b-a4b-it",
+  "gemma-4-26b": "@cf/google/gemma-4-26b-a4b-it",
+  "gemma": "@cf/google/gemma-4-26b-a4b-it",
 };
 
 const EMBEDDING_ALIASES: Record<string, string> = {
@@ -52,17 +57,24 @@ export const VISION_DEFAULT_MODEL = "@cf/meta/llama-3.2-11b-vision-instruct";
 // and don't get rerouted. Keeps us forward-compatible with new vision
 // model releases without an explicit allowlist.
 const VISION_ID_HINTS = ["vision", "llava", "uform", "vlm"];
+// Models without a "vision" hint in the name that nevertheless accept
+// image_url content parts (verified against the Workers AI catalogue).
+const VISION_CAPABLE_EXACT = new Set<string>([
+  "@cf/google/gemma-4-26b-a4b-it",
+]);
 
 export function isVisionModel(id: string | undefined | null): boolean {
   if (!id) return false;
+  if (VISION_CAPABLE_EXACT.has(id)) return true;
   const lower = id.toLowerCase();
   return VISION_ID_HINTS.some((hint) => lower.includes(hint));
 }
 
-// Reasoning-style models stream a <think>...</think> block before their
-// final answer. The chat / responses handlers split that off into
-// reasoning_content / a Responses API "reasoning" item respectively.
-const REASONING_ID_HINTS = ["deepseek-r1", "qwq"];
+// Reasoning-style models. Two formats coexist on Workers AI:
+//   - <think>...</think> blocks inside `message.content` (DeepSeek-R1, QwQ)
+//   - a separate `message.reasoning` field (Gemma 4, OpenAI o-series shape)
+// The chat / responses handlers cover both.
+const REASONING_ID_HINTS = ["deepseek-r1", "qwq", "gemma-4"];
 
 export function isReasoningModel(id: string | undefined | null): boolean {
   if (!id) return false;
@@ -118,6 +130,8 @@ export const ADVERTISED_MODELS: string[] = [
   "o3",
   "o3-mini",
   "o4-mini",
+  "gemma-4",
+  "gemma-4-26b",
   // OpenAI-style aliases — embeddings, audio, images
   "text-embedding-ada-002",
   "text-embedding-3-small",
@@ -130,6 +144,8 @@ export const ADVERTISED_MODELS: string[] = [
   "text-moderation-latest",
   "text-moderation-stable",
   // Native Workers AI IDs (chat)
+  "@cf/google/gemma-4-26b-a4b-it",
+  "@cf/google/gemma-3-12b-it",
   "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
   "@cf/meta/llama-3.1-8b-instruct",
   "@cf/meta/llama-3.2-3b-instruct",
@@ -139,7 +155,6 @@ export const ADVERTISED_MODELS: string[] = [
   "@cf/qwen/qwen3-30b-a3b-fp8",
   "@cf/qwen/qwq-32b",
   "@cf/qwen/qwen2.5-coder-32b-instruct",
-  "@cf/google/gemma-3-12b-it",
   "@cf/ibm-granite/granite-4.0-h-micro",
   "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b",
   "@hf/nousresearch/hermes-2-pro-mistral-7b",

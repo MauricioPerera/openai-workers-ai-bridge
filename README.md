@@ -9,7 +9,7 @@ Drop-in OpenAI-compatible API for **Cloudflare Workers AI**. Deploy this Worker 
 | OpenAI endpoint | Status | Notes |
 |---|---|---|
 | `GET  /v1/models` | ✅ | OpenAI-style aliases (`gpt-4o`, `text-embedding-3-small`, `tts-1`, `dall-e-3`) plus native `@cf/...` IDs. |
-| `POST /v1/chat/completions` | ✅ | Streaming (SSE) and non-streaming. Tool / function calling. Vision via `image_url` parts (auto-routes to a vision model and inlines remote URLs as base64). |
+| `POST /v1/chat/completions` | ✅ | Streaming (SSE) and non-streaming. Tool / function calling. Vision via `image_url` parts (auto-routes to a vision model and inlines remote URLs as base64). Reasoning models (`o1`, `o3`, `gemma-4`) return chain-of-thought as `message.reasoning_content`. |
 | `POST /v1/responses` | ✅ | OpenAI's newer Responses API. Streaming + non-streaming. Multi-turn agent loops with `function_call` / `function_call_output` items. Used by recent n8n / LangChain.js / OpenAI SDK helpers. |
 | `POST /v1/embeddings` | ✅ | Single string or array. Returns OpenAI shape. *Dimensions differ from OpenAI — see below.* |
 | `POST /v1/audio/transcriptions` | ✅ | Multipart upload → Whisper (`@cf/openai/whisper` or `whisper-large-v3-turbo`). Supports `json`, `text`, `verbose_json`, `vtt`. |
@@ -31,7 +31,9 @@ Any model id starting with `@<provider>/` (e.g. `@cf/...`, `@hf/...`) is forward
 - **Remote image URLs are auto-inlined.** Workers AI vision models reject `https://` URLs and require `data:` URIs. The bridge fetches the URL (with a User-Agent so Wikipedia / GitHub user-content don't 400), validates content-type, caps at 10 MB, and sends the base64 data URI upstream.
 - **Optional REST API path.** The `env.AI` binding has been observed to behave inconsistently for tool calling depending on the calling context. Setting `CLOUDFLARE_TOKEN` + `CLOUDFLARE_ACCOUNT_ID` as Worker secrets switches the bridge to the public REST endpoint, which has been more reliable. The binding remains the default when no token is configured.
 - **Constant-time API key compare.** Cheap and free — no reason to be timing-channel sleepy on bearer auth.
-- **DeepSeek-R1 / QwQ reasoning split.** R1 emits `<think>...</think>` blocks before the answer. The bridge splits them off into `message.reasoning_content` (chat.completions) or a `{type:"reasoning"}` output item (Responses API), so o-series clients see clean answers without surprise reasoning leaking into UI.
+- **Reasoning split — two formats unified.** DeepSeek-R1 / QwQ emit `<think>...</think>` blocks inside the content. Gemma 4 puts the chain-of-thought in a separate `message.reasoning` field (matching OpenAI's o-series response shape). The bridge handles both transparently and surfaces the reasoning as `message.reasoning_content` (chat.completions) or a `{type:"reasoning"}` output item (Responses API).
+- **Gemma 4 — vision + reasoning + tools in one model.** Google's `gemma-4-26b-a4b-it` does all three: pass `image_url` parts, pass `tools`, get back a real `function_call` plus the model's reasoning trace. Available via `gemma-4` alias or the native `@cf/google/gemma-4-26b-a4b-it` id.
+- **Matryoshka embedding truncation.** EmbeddingGemma, BGE-M3, and Qwen3-embedding are trained for it; the bridge accepts OpenAI's `dimensions` parameter and truncates + L2-renormalizes against those models. Non-Matryoshka models reject `dimensions` with a 400 instead of corrupting your vectors silently.
 - **Embeddings cache.** SHA-256 of `(model, text)` keyed against the edge Cache API for a week. RAG pipelines that repeat queries pay neurons once; the second call returns the same vector for free.
 - **Optional rate limiting.** Add a `[[unsafe.bindings]]` ratelimit binding in `wrangler.toml` and `/v1/*` is throttled per-API-key (or per-IP). Without the binding, no rate limiting — the deploy template still works.
 

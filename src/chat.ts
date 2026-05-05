@@ -65,11 +65,10 @@ function generateId(): string {
   return "chatcmpl-" + crypto.randomUUID().replace(/-/g, "").slice(0, 24);
 }
 
-// DeepSeek-R1 distill emits <think>...</think> reasoning before the final
-// answer. OpenAI o1 clients don't expect it (reasoning is a separate field
-// for them). We split it off and forward it as `reasoning_content` —
-// LangChain / LibreChat / OpenAI SDK ≥ 4.0 will pick it up if they care,
-// otherwise it's a non-disruptive extra field.
+// Two reasoning conventions on Workers AI:
+//   - <think>...</think> inside content (DeepSeek-R1, QwQ)
+//   - a separate `message.reasoning` field (Gemma 4, OpenAI o-series)
+// We unify both into `reasoning_content` on the outgoing chat.completion.
 function splitReasoning(raw: string): { content: string; reasoning?: string } {
   if (!raw) return { content: raw };
   const match = raw.match(/^\s*<think>([\s\S]*?)<\/think>\s*([\s\S]*)$/);
@@ -146,7 +145,15 @@ export async function handleChatCompletions(c: Context<{ Bindings: Env }>) {
       ?? (typeof result?.response === "string" ? result.response : null)
       ?? (typeof result?.result?.response === "string" ? result.result.response : null)
       ?? "";
-    const { content: text, reasoning } = splitReasoning(rawText);
+    const { content: text, reasoning: thinkBlockReasoning } = splitReasoning(rawText);
+    // Gemma 4 (and OpenAI's o-series shape on Workers AI) puts the chain of
+    // thought in `message.reasoning` directly. Prefer that when both are
+    // present; otherwise fall back to whatever we extracted from <think>.
+    const nativeReasoning =
+      typeof nativeChoice?.message?.reasoning === "string" && nativeChoice.message.reasoning.trim()
+        ? nativeChoice.message.reasoning.trim()
+        : null;
+    const reasoning = nativeReasoning ?? thinkBlockReasoning;
     const toolCalls = nativeChoice?.message?.tool_calls?.length
       ? nativeChoice.message.tool_calls
       : (result?.tool_calls?.length ? result.tool_calls : undefined);

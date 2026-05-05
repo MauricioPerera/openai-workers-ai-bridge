@@ -290,10 +290,16 @@ export async function handleResponses(c: Context<{ Bindings: Env }>) {
       ?? (typeof result?.response === "string" ? result.response : null)
       ?? (typeof result?.result?.response === "string" ? result.result.response : null)
       ?? "";
-    // Split off DeepSeek-R1 <think>...</think> reasoning if present.
-    const thinkMatch = rawText.match(/^\s*<think>([\s\S]*?)<\/think>\s*([\s\S]*)$/);
+    // Two reasoning shapes coexist:
+    //   - <think>...</think> in content (DeepSeek-R1, QwQ)
+    //   - native message.reasoning field (Gemma 4, o-series)
+    const nativeReasoning =
+      typeof nativeChoice?.message?.reasoning === "string" && nativeChoice.message.reasoning.trim()
+        ? nativeChoice.message.reasoning.trim()
+        : null;
+    const thinkMatch = nativeReasoning ? null : rawText.match(/^\s*<think>([\s\S]*?)<\/think>\s*([\s\S]*)$/);
     const text = thinkMatch ? thinkMatch[2].trim() : rawText;
-    const reasoning = thinkMatch ? thinkMatch[1].trim() : null;
+    const reasoning = nativeReasoning ?? (thinkMatch ? thinkMatch[1].trim() : null);
     const inputTokens = result?.usage?.prompt_tokens ?? 0;
     const outputTokens = result?.usage?.completion_tokens ?? 0;
     const toolCalls = nativeChoice?.message?.tool_calls?.length
