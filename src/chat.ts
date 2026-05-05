@@ -1,6 +1,7 @@
 import type { Context } from "hono";
 import { runAI } from "./ai-client";
 import { resolveChatModel } from "./mapping";
+import { createToolCallStreamParser } from "./tool-call-parser";
 import type { ChatCompletionRequest, ChatMessage, Env } from "./types";
 
 // Adapt OpenAI multi-part content for Workers AI. Text-only messages are
@@ -176,6 +177,50 @@ export async function handleChatCompletions(c: Context<{ Bindings: Env }>) {
       let sawToolCalls = false;
       let upstreamFinishReason: string | null = null;
       let upstreamUsage: any = null;
+      let nextSyntheticToolIdx = 10000;
+
+      // Inline-tag parser (Hermes / Mistral chat-template models stream tool
+      // calls as raw `<tool_call>{...}</tool_call>` content tokens). Text
+      // outside tags becomes a normal content delta; parsed tool calls become
+      // synthetic tool_calls deltas in chat.completions shape.
+      const tagParser = createToolCallStreamParser({
+        onText: (chunk: string) => {
+          writeEvent({
+            id,
+            object: "chat.completion.chunk",
+            created,
+            model: modelLabel,
+            choices: [{ index: 0, delta: { content: chunk }, finish_reason: null }],
+          });
+        },
+        onToolCall: ({ name, arguments: args }) => {
+          sawToolCalls = true;
+          const idx = nextSyntheticToolIdx++;
+          writeEvent({
+            id,
+            object: "chat.completion.chunk",
+            created,
+            model: modelLabel,
+            choices: [
+              {
+                index: 0,
+                delta: {
+                  tool_calls: [
+                    {
+                      index: idx,
+                      id: `call_${idx}`,
+                      type: "function",
+                      function: { name, arguments: args },
+                    },
+                  ],
+                },
+                finish_reason: null,
+              },
+            ],
+          });
+        },
+      });
+
       try {
         while (true) {
           const { done, value } = await reader.read();
@@ -207,15 +252,7 @@ export async function handleChatCompletions(c: Context<{ Bindings: Env }>) {
                 if (parsed.usage) upstreamUsage = parsed.usage;
                 if (nativeChoice?.finish_reason) upstreamFinishReason = nativeChoice.finish_reason;
 
-                if (token) {
-                  writeEvent({
-                    id,
-                    object: "chat.completion.chunk",
-                    created,
-                    model: modelLabel,
-                    choices: [{ index: 0, delta: { content: token }, finish_reason: null }],
-                  });
-                }
+                if (token) tagParser.feed(token);
                 if (deltaToolCalls && deltaToolCalls.length) {
                   sawToolCalls = true;
                   // Normalize legacy `[{name, arguments}]` into chat.completions delta shape.
@@ -251,6 +288,9 @@ export async function handleChatCompletions(c: Context<{ Bindings: Env }>) {
         // a delta chunk is non-standard and breaks some clients.
         console.error("[/v1/chat] stream error:", (err as Error).message);
       }
+
+      // Flush anything left buffered inside the inline-tag parser.
+      tagParser.end();
 
       const finishReason = upstreamFinishReason ?? (sawToolCalls ? "tool_calls" : "stop");
       const finalChunk: Record<string, unknown> = {

@@ -1,6 +1,7 @@
 import type { Context } from "hono";
 import { runAI } from "./ai-client";
 import { resolveChatModel } from "./mapping";
+import { createToolCallStreamParser } from "./tool-call-parser";
 import type { Env } from "./types";
 
 // OpenAI Responses API (`POST /v1/responses`) — released 2025. Some clients
@@ -370,6 +371,40 @@ export async function handleResponses(c: Context<{ Bindings: Env }>) {
       let fullText = "";
       let upstreamUsage: any = null;
 
+      // Parser for the inline `<tool_call>...</tool_call>` blocks some Mistral/
+      // Hermes models stream as raw content. Each parsed tool call becomes a
+      // synthetic accumulator entry so the same close-out path handles them
+      // alongside structured tool_calls deltas from other models.
+      let nextSyntheticIdx = 10000;
+      const tagParser = createToolCallStreamParser({
+        onText: (chunk: string) => {
+          startMessageItem();
+          fullText += chunk;
+          writeEvent("response.output_text.delta", {
+            type: "response.output_text.delta",
+            item_id: messageId,
+            output_index: messageOutputIndex,
+            content_index: 0,
+            delta: chunk,
+          });
+        },
+        onToolCall: ({ name, arguments: args }) => {
+          const idx = nextSyntheticIdx++;
+          const acc = ensureToolCallStarted(idx, undefined, name);
+          // Emit the entire arguments string as a single delta so consumers
+          // see at least one *.arguments.delta event before *.done.
+          if (args) {
+            acc.argsBuffer += args;
+            writeEvent("response.function_call_arguments.delta", {
+              type: "response.function_call_arguments.delta",
+              item_id: acc.itemId,
+              output_index: acc.outputIndex,
+              delta: args,
+            });
+          }
+        },
+      });
+
       const ensureToolCallStarted = (idx: number, id: string | undefined, name: string | undefined): ToolCallAcc => {
         let acc = toolCalls.get(idx);
         if (!acc) {
@@ -425,17 +460,7 @@ export async function handleResponses(c: Context<{ Bindings: Env }>) {
                 const token: string = nativeDelta?.content ?? parsed.response ?? parsed.delta ?? "";
                 if (parsed.usage) upstreamUsage = parsed.usage;
 
-                if (token) {
-                  startMessageItem();
-                  fullText += token;
-                  writeEvent("response.output_text.delta", {
-                    type: "response.output_text.delta",
-                    item_id: messageId,
-                    output_index: messageOutputIndex,
-                    content_index: 0,
-                    delta: token,
-                  });
-                }
+                if (token) tagParser.feed(token);
 
                 // Tool calls — both shapes:
                 //   OpenAI native delta: { tool_calls:[{index, id?, function:{name?, arguments?}}] }
@@ -475,6 +500,9 @@ export async function handleResponses(c: Context<{ Bindings: Env }>) {
         controller.close();
         return;
       }
+
+      // Flush any text/tool-call still buffered inside the inline-tag parser.
+      tagParser.end();
 
       // Close the message item only if we actually started one.
       const hasText = fullText.length > 0;
