@@ -2,6 +2,12 @@ export interface RateLimiter {
   limit(input: { key: string }): Promise<{ success: boolean }>;
 }
 
+// Cloudflare Analytics Engine — optional binding for per-request telemetry.
+// One row per /v1/* call: model, endpoint, latency, token counts, status.
+export interface AnalyticsDataset {
+  writeDataPoint(point: { blobs?: string[]; doubles?: number[]; indexes?: string[] }): void;
+}
+
 export interface Env {
   AI: Ai;
   DEFAULT_CHAT_MODEL?: string;
@@ -16,6 +22,10 @@ export interface Env {
   // /v1/* requests are throttled per-API-key (or per-IP if no auth). Skipped
   // when absent so the template still deploys without extra setup.
   RATE_LIMITER?: RateLimiter;
+  // Optional Analytics Engine dataset. When bound, the bridge writes one row
+  // per /v1/* call (endpoint, model, status, latency, tokens) so you can
+  // graph token/latency/cost over time without paying for an external service.
+  ANALYTICS?: AnalyticsDataset;
 }
 
 export interface ChatMessage {

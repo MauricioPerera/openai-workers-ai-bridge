@@ -30,3 +30,11 @@ enabled = true
 # type = "ratelimit"
 # namespace_id = "1001"
 # simple = { limit = 60, period = 60 }
+
+# Optional — uncomment to write one row per /v1/* call to Analytics Engine
+# (free dataset, queryable via the GraphQL Analytics API). Useful for
+# graphing latency / endpoint mix / status codes over time.
+#
+# [[analytics_engine_datasets]]
+# binding = "ANALYTICS"
+# dataset = "openai_bridge"

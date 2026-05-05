@@ -29,6 +29,31 @@ function safeEqual(a: string, b: string): boolean {
   return diff === 0;
 }
 
+// Optional Analytics Engine instrumentation. Writes one row per /v1/* call
+// when env.ANALYTICS is bound; no-op otherwise.
+app.use("/v1/*", async (c, next) => {
+  const analytics = c.env.ANALYTICS;
+  if (!analytics) return next();
+  const start = Date.now();
+  try {
+    await next();
+  } finally {
+    try {
+      analytics.writeDataPoint({
+        indexes: [c.req.path],
+        blobs: [
+          c.req.method,
+          c.req.path,
+          String(c.res?.status ?? 0),
+        ],
+        doubles: [Date.now() - start],
+      });
+    } catch {
+      // Telemetry must never break the request path.
+    }
+  }
+});
+
 // Bearer-token auth. Skipped only when API_KEY is not configured (open mode).
 app.use("/v1/*", async (c, next) => {
   const expected = c.env.API_KEY;
