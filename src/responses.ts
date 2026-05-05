@@ -50,18 +50,69 @@ function flattenResponsesContent(content: ResponsesInputItem["content"]): string
     .join("\n");
 }
 
-function adaptInputToMessages(req: ResponsesRequest): Array<{ role: string; content: string }> {
-  const messages: Array<{ role: string; content: string }> = [];
+// Responses API allows several item types in the `input` array:
+//   - { type: "message", role, content }
+//   - { type: "function_call", id, call_id, name, arguments }
+//   - { type: "function_call_output", call_id, output }
+// In multi-turn agent loops (n8n, LangChain), the second and third types
+// carry the tool call/result history that the model needs to keep going.
+// Convert them to chat.completions equivalents:
+//   function_call          → { role:"assistant", tool_calls:[{ id, type:"function", function:{name, arguments} }] }
+//   function_call_output   → { role:"tool", tool_call_id, content }
+type ChatTurn = {
+  role: string;
+  content?: string;
+  tool_calls?: unknown[];
+  tool_call_id?: string;
+};
+
+function adaptInputToMessages(req: ResponsesRequest): ChatTurn[] {
+  const messages: ChatTurn[] = [];
   if (req.instructions) messages.push({ role: "system", content: req.instructions });
 
   if (typeof req.input === "string") {
     messages.push({ role: "user", content: req.input });
-  } else if (Array.isArray(req.input)) {
-    for (const item of req.input) {
-      // OpenAI sometimes nests assistant outputs as items with type="message" — handle both.
-      const role = item.role === "developer" ? "system" : (item.role ?? "user");
-      const content = flattenResponsesContent(item.content);
-      if (content) messages.push({ role, content });
+    return messages;
+  }
+  if (!Array.isArray(req.input)) return messages;
+
+  for (const item of req.input as any[]) {
+    if (!item || typeof item !== "object") continue;
+
+    if (item.type === "function_call") {
+      const args = typeof item.arguments === "string"
+        ? item.arguments
+        : JSON.stringify(item.arguments ?? {});
+      const callId = item.call_id ?? item.id ?? `call_${messages.length}`;
+      messages.push({
+        role: "assistant",
+        content: "",
+        tool_calls: [
+          {
+            id: callId,
+            type: "function",
+            function: { name: item.name, arguments: args },
+          },
+        ],
+      });
+      continue;
+    }
+
+    if (item.type === "function_call_output") {
+      const output = typeof item.output === "string" ? item.output : JSON.stringify(item.output ?? "");
+      messages.push({
+        role: "tool",
+        tool_call_id: item.call_id ?? item.id ?? "",
+        content: output,
+      });
+      continue;
+    }
+
+    // Default: treat as a message item (with or without explicit type:"message").
+    const role = item.role === "developer" ? "system" : (item.role ?? "user");
+    const content = flattenResponsesContent(item.content);
+    if (content || item.role === "assistant") {
+      messages.push({ role, content });
     }
   }
   return messages;
@@ -93,13 +144,36 @@ function adaptResponsesTools(tools: unknown[]): unknown[] {
 // Inverse: chat.completions tool_calls → Responses API output items.
 //   chat: [{ id, type:"function", function:{ name, arguments } }]
 //   resp: [{ type:"function_call", id, call_id, name, arguments }]
+//
+// `arguments` must be a single-encoded JSON string. Some Workers AI models
+// (Granite in particular) occasionally double-encode it: the value parses to
+// another JSON string instead of an object. We unwrap that to keep n8n /
+// LangChain happy, since they expect JSON.parse(arguments) to yield the args.
+function normalizeArguments(raw: unknown): string {
+  if (raw == null) return "{}";
+  if (typeof raw !== "string") {
+    try { return JSON.stringify(raw); } catch { return "{}"; }
+  }
+  let parsed: unknown;
+  try { parsed = JSON.parse(raw); } catch { return raw; }
+  if (typeof parsed === "string") {
+    try {
+      const inner = JSON.parse(parsed);
+      return JSON.stringify(inner);
+    } catch {
+      return raw;
+    }
+  }
+  return raw;
+}
+
 function toolCallsToResponsesItems(toolCalls: any[]): unknown[] {
   return toolCalls.map((tc, idx) => ({
     type: "function_call",
     id: tc.id ?? `fc_${idx}`,
     call_id: tc.id ?? `call_${idx}`,
     name: tc.function?.name ?? tc.name,
-    arguments: tc.function?.arguments ?? tc.arguments ?? "{}",
+    arguments: normalizeArguments(tc.function?.arguments ?? tc.arguments ?? "{}"),
     status: "completed",
   }));
 }
