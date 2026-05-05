@@ -1,40 +1,48 @@
 # OpenAI ↔ Workers AI Bridge
 
-OpenAI-compatible API for **Cloudflare Workers AI**. Deploy this Worker to your own Cloudflare account and you get a drop-in OpenAI endpoint that lets **n8n**, **LibreChat**, **Open WebUI**, **Cursor**, **Continue.dev**, the OpenAI SDKs, or any tool that speaks the OpenAI API talk to Workers AI models (Llama 3, Mistral, Qwen, Gemma, DeepSeek, BGE embeddings, …).
+Drop-in OpenAI-compatible API for **Cloudflare Workers AI**. Deploy this Worker to your own Cloudflare account and any tool that speaks the OpenAI API — **n8n**, **LibreChat**, **Open WebUI**, **Cursor**, **Continue.dev**, the OpenAI SDKs, LangChain — can talk to Workers AI models (Llama, Mistral, Hermes, Granite, DeepSeek, Whisper, Flux, BGE, …).
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/MauricioPerera/openai-workers-ai-bridge)
 
-## What it does
+## Endpoints
 
 | OpenAI endpoint | Status | Notes |
 |---|---|---|
-| `GET  /v1/models` | ✅ | Lists OpenAI-style aliases (`gpt-4o`, `gpt-3.5-turbo`, …) plus native `@cf/...` IDs. |
-| `POST /v1/chat/completions` | ✅ | Streaming (SSE) and non-streaming. Tool/function calling passed through. Vision-capable when `image_url` parts are present. |
-| `POST /v1/responses` | ✅ | OpenAI's newer Responses API (used by recent n8n / LangChain.js / OpenAI SDK helpers). Streaming + non-streaming. |
-| `POST /v1/embeddings` | ✅ | Single string or array. Returns OpenAI shape. |
+| `GET  /v1/models` | ✅ | OpenAI-style aliases (`gpt-4o`, `text-embedding-3-small`, `tts-1`, `dall-e-3`) plus native `@cf/...` IDs. |
+| `POST /v1/chat/completions` | ✅ | Streaming (SSE) and non-streaming. Tool / function calling. Vision via `image_url` parts (auto-routes to a vision model and inlines remote URLs as base64). |
+| `POST /v1/responses` | ✅ | OpenAI's newer Responses API. Streaming + non-streaming. Multi-turn agent loops with `function_call` / `function_call_output` items. Used by recent n8n / LangChain.js / OpenAI SDK helpers. |
+| `POST /v1/embeddings` | ✅ | Single string or array. Returns OpenAI shape. *Dimensions differ from OpenAI — see below.* |
 | `POST /v1/audio/transcriptions` | ✅ | Multipart upload → Whisper (`@cf/openai/whisper` or `whisper-large-v3-turbo`). Supports `json`, `text`, `verbose_json`, `vtt`. |
+| `POST /v1/audio/speech` | ✅ | TTS via `@cf/myshell-ai/melotts` (multilingual, WAV) or `@cf/deepgram/aura-1` (English, MP3). |
+| `POST /v1/images/generations` | ✅ | Flux schnell, SDXL Lightning, Dreamshaper. Returns `b64_json` or a `data:` URL. |
 
-OpenAI model names are mapped to Workers AI equivalents (see [`src/mapping.ts`](src/mapping.ts)). Any model id starting with `@cf/` is forwarded as-is, so you can target any Workers AI model directly.
+Any model id starting with `@<provider>/` (e.g. `@cf/...`, `@hf/...`) is forwarded to Workers AI verbatim, so you can target every model your account has access to without waiting for an alias.
 
-## Deploy in one click
+## What makes this different from a one-night-hack bridge
 
-1. Fork this repo.
-2. Update the **Deploy to Cloudflare** button URL in this README to point at your fork.
-3. Click the button. Cloudflare will:
-   - clone the repo into your account,
-   - install dependencies,
-   - bind Workers AI automatically (the `[ai]` block in `wrangler.toml`),
-   - deploy the Worker.
-4. (Recommended) Set an API key so the endpoint isn't open to the world:
-   ```bash
-   wrangler secret put API_KEY
-   # paste any string, e.g. `sk-myproject-7f3a...`
-   ```
-   Without `API_KEY` the Worker runs in open mode.
+- **Multi-turn tool calling on `/v1/responses` actually works.** `function_call` and `function_call_output` items in the input array are translated to the chat-completions equivalents the model needs to keep going. Most agents in n8n / LangChain rely on this loop and silently fail when the bridge drops it.
+- **Streaming tool calls emit the right Responses API events** (`response.output_item.added` with `type:"function_call"`, `response.function_call_arguments.delta`, `response.function_call_arguments.done`, `response.output_item.done`) — the lifecycle that LangChain's `responses.stream()` and n8n's agent nodes consume.
+- **Hermes / Mistral chat-template models** stream tool calls as raw `<tool_call>...</tool_call>` content tokens because Workers AI doesn't parse the XML in streaming mode. The bridge ships a streaming state machine that detects, buffers and parses these blocks (including Python-style single-quoted JSON some Hermes builds emit) and emits proper `function_call` events.
+- **Dual-shape upstream parsing.** Workers AI returns either the legacy `{response: "...", tool_calls: [...]}` shape (Llama, Mistral) or the OpenAI-native `{choices:[{message:{content,tool_calls},finish_reason}]}` shape (Granite, DeepSeek-R1, newer models). The bridge handles both transparently.
+- **Granite / DeepSeek-R1 double-encoded `arguments` get unwrapped.** Some models hand back `tool_calls[].arguments` as a JSON-encoded string of a JSON string. The bridge normalizes them so `JSON.parse(arguments)` on the client side just works.
+- **Vision auto-routing.** Send `gpt-4o` with an `image_url` part and the bridge reroutes to `@cf/meta/llama-3.2-11b-vision-instruct` automatically. The caller's model id is preserved in the response so OpenAI clients see what they sent.
+- **Remote image URLs are auto-inlined.** Workers AI vision models reject `https://` URLs and require `data:` URIs. The bridge fetches the URL (with a User-Agent so Wikipedia / GitHub user-content don't 400), validates content-type, caps at 10 MB, and sends the base64 data URI upstream.
+- **Optional REST API path.** The `env.AI` binding has been observed to behave inconsistently for tool calling depending on the calling context. Setting `CLOUDFLARE_TOKEN` + `CLOUDFLARE_ACCOUNT_ID` as Worker secrets switches the bridge to the public REST endpoint, which has been more reliable. The binding remains the default when no token is configured.
+- **Constant-time API key compare.** Cheap and free — no reason to be timing-channel sleepy on bearer auth.
 
-Your endpoint is now live at `https://openai-workers-ai-bridge.<your-subdomain>.workers.dev`.
+## Deploy
 
-## Deploy from the CLI
+### One click
+
+Click the **Deploy to Cloudflare** badge above. Cloudflare clones the repo into your account, installs deps, binds Workers AI automatically, and deploys the Worker.
+
+(Recommended) Add an API key so the endpoint isn't open to the world:
+```bash
+wrangler secret put API_KEY
+# paste any string, e.g. sk-myproject-7f3a...
+```
+
+### From the CLI
 
 ```bash
 git clone https://github.com/MauricioPerera/openai-workers-ai-bridge.git
@@ -42,19 +50,23 @@ cd openai-workers-ai-bridge
 npm install
 npx wrangler login
 npx wrangler deploy
-npx wrangler secret put API_KEY   # optional but recommended
+npx wrangler secret put API_KEY                  # optional but recommended
+npx wrangler secret put CLOUDFLARE_TOKEN         # optional — see below
+npx wrangler secret put CLOUDFLARE_ACCOUNT_ID    # optional — see below
 ```
+
+`CLOUDFLARE_TOKEN` is an API token with **Workers AI Read + Workers AI Write** scope (create one at https://dash.cloudflare.com/profile/api-tokens). When set, the bridge calls Workers AI via the REST endpoint instead of the AI binding.
 
 ## Local development
 
 ```bash
-cp .dev.vars.example .dev.vars   # edit API_KEY if you want auth locally
+cp .dev.vars.example .dev.vars   # edit API_KEY for local auth (optional)
 npm install
 npm run dev                       # http://127.0.0.1:8787
-npm test                          # hermetic unit tests with vitest-pool-workers
+npm test                          # hermetic unit tests via vitest-pool-workers
 ```
 
-Quick sanity checks:
+Sanity checks:
 ```bash
 # Chat
 curl http://127.0.0.1:8787/v1/chat/completions \
@@ -62,27 +74,60 @@ curl http://127.0.0.1:8787/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}'
 
-# Embeddings
-curl http://127.0.0.1:8787/v1/embeddings \
+# Vision (URL is fetched and inlined automatically)
+curl http://127.0.0.1:8787/v1/chat/completions \
   -H "Authorization: Bearer sk-local-dev-change-me" \
   -H "Content-Type: application/json" \
-  -d '{"model":"text-embedding-3-small","input":"hello"}'
+  -d '{"model":"gpt-4o","messages":[{"role":"user","content":[
+       {"type":"text","text":"one word for this image"},
+       {"type":"image_url","image_url":{"url":"https://example.com/cat.jpg"}}
+     ]}]}'
 
-# Whisper (whisper-1 → @cf/openai/whisper)
+# Whisper
 curl http://127.0.0.1:8787/v1/audio/transcriptions \
   -H "Authorization: Bearer sk-local-dev-change-me" \
-  -F "file=@audio.mp3" \
-  -F "model=whisper-1"
+  -F "file=@audio.mp3" -F "model=whisper-1"
+
+# TTS
+curl http://127.0.0.1:8787/v1/audio/speech \
+  -H "Authorization: Bearer sk-local-dev-change-me" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"tts-1","input":"hello world","voice":"alloy"}' \
+  -o out.wav
+
+# Image generation
+curl http://127.0.0.1:8787/v1/images/generations \
+  -H "Authorization: Bearer sk-local-dev-change-me" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"dall-e-3","prompt":"a smiling sun, flat illustration","response_format":"b64_json"}'
 ```
 
 ## Use it in n8n
 
-1. In n8n, open **Credentials → New → OpenAI**.
-2. Set:
-   - **API Key**: the value you set with `wrangler secret put API_KEY`.
-   - **Base URL**: `https://openai-workers-ai-bridge.<your-subdomain>.workers.dev/v1`
-3. Drop an **OpenAI Chat Model** node (or use it as the LLM in any AI Agent / Chain node) and pick a model — `gpt-4o`, `gpt-4o-mini`, or any `@cf/...` id you want.
-4. For embeddings, use the **Embeddings OpenAI** node with the same credential and model `text-embedding-3-small` (or any `@cf/baai/...`).
+1. **Credentials → New → OpenAI**:
+   - API Key: whatever you set with `wrangler secret put API_KEY`
+   - Base URL: `https://openai-workers-ai-bridge.<subdomain>.workers.dev/v1`
+2. Use the credential in any **OpenAI Chat Model** node, **Embeddings OpenAI** node, or as the LLM in an **AI Agent** / **Chain** node. Pick `gpt-4o`, `gpt-4o-mini`, or any `@cf/...` / `@hf/...` id directly.
+3. The agent loop — multi-turn tool calling, function_call → function_call_output round-trips, streaming — works on **non-vision text models**: Llama 3.3 70B, Hermes-2-Pro, Granite, DeepSeek-R1, Qwen.
+
+## Use it in LibreChat
+
+In `librechat.yaml`:
+```yaml
+endpoints:
+  custom:
+    - name: "Workers AI"
+      apiKey: "${WORKERS_AI_KEY}"
+      baseURL: "https://openai-workers-ai-bridge.<subdomain>.workers.dev/v1"
+      models:
+        default: ["gpt-4o-mini", "gpt-4o", "@cf/ibm-granite/granite-4.0-h-micro", "@hf/nousresearch/hermes-2-pro-mistral-7b"]
+        fetch: false
+      titleConvo: true
+      titleModel: "gpt-4o-mini"
+      modelDisplayLabel: "Workers AI"
+```
+
+For TTS / image features in LibreChat, point its TTS service and image generation at the same base URL.
 
 ## Use it from the OpenAI SDK
 
@@ -91,22 +136,45 @@ import OpenAI from "openai";
 
 const client = new OpenAI({
   apiKey: process.env.WORKERS_AI_KEY,
-  baseURL: "https://openai-workers-ai-bridge.<your-subdomain>.workers.dev/v1",
+  baseURL: "https://openai-workers-ai-bridge.<subdomain>.workers.dev/v1",
 });
 
+// Chat with streaming
 const res = await client.chat.completions.create({
   model: "gpt-4o",                              // → @cf/meta/llama-3.3-70b-instruct-fp8-fast
   messages: [{ role: "user", content: "hi" }],
   stream: true,
 });
 for await (const chunk of res) process.stdout.write(chunk.choices[0]?.delta?.content ?? "");
+
+// Image
+const img = await client.images.generate({
+  model: "dall-e-3",                            // → @cf/black-forest-labs/flux-1-schnell
+  prompt: "a smiling cartoon sun",
+  response_format: "b64_json",
+});
 ```
+
+## Embeddings — dimension warning
+
+Workers AI's BGE family does **not** match OpenAI's embedding dimensions. If you have vectors stored from OpenAI and try to query through this bridge, similarity scores will be wrong (different vector spaces, different dimensions).
+
+| Alias | Routes to | Dimensions |
+|---|---|---|
+| `text-embedding-3-small` | `@cf/baai/bge-small-en-v1.5` | 384 *(OpenAI: 1536)* |
+| `text-embedding-3-large` | `@cf/baai/bge-large-en-v1.5` | 1024 *(OpenAI: 3072)* |
+| `text-embedding-ada-002` | `@cf/baai/bge-base-en-v1.5` | 768 *(OpenAI: 1536)* |
+| `@cf/baai/bge-m3` | (default) | 1024 |
+
+Either re-embed your existing corpus through this bridge once, or target a Workers AI embedding model directly with `@cf/baai/...`.
 
 ## Configuration
 
 | Variable | Type | Default | Purpose |
 |---|---|---|---|
 | `API_KEY` | secret | *(unset)* | If set, requires `Authorization: Bearer <API_KEY>` on `/v1/*`. |
+| `CLOUDFLARE_TOKEN` | secret | *(unset)* | Optional. With `CLOUDFLARE_ACCOUNT_ID`, switches the bridge to the Workers AI REST API instead of the binding. Requires `Workers AI Read + Write` scope. |
+| `CLOUDFLARE_ACCOUNT_ID` | secret | *(unset)* | Pair with `CLOUDFLARE_TOKEN`. |
 | `DEFAULT_CHAT_MODEL` | var | `@cf/meta/llama-3.3-70b-instruct-fp8-fast` | Used when the request's `model` doesn't match a known alias. |
 | `DEFAULT_EMBEDDING_MODEL` | var | `@cf/baai/bge-m3` | Same, for `/v1/embeddings`. |
 
@@ -114,22 +182,29 @@ Set vars in `wrangler.toml` (or the Cloudflare dashboard); set secrets with `wra
 
 ## Limitations & notes
 
-- **Pricing** — calls hit Workers AI on *your* Cloudflare account; you pay for the neurons consumed.
-- **Tool calling** — passed through to models that support it (Llama 3.x). Behaviour matches Workers AI's native output.
-- **Vision / multipart messages** — text-only multipart `content` arrays are flattened to a string; if any part is `image_url` the whole array is forwarded as-is. Combine with a vision-capable model (e.g. `@cf/meta/llama-3.2-11b-vision-instruct`) to use it.
-- **Token usage** — Workers AI doesn't always return usage counts, so `usage` may be zero in responses.
-- **Rate limits** — the Worker itself is unmetered, but Workers AI applies its own quotas per account.
+- **You pay** — calls hit Workers AI on *your* Cloudflare account; you pay for the neurons consumed.
+- **Token usage on streaming** — Workers AI doesn't always emit `usage` on the final SSE chunk; `usage` may be zero in streaming responses.
+- **Image generation `n>1`** — Workers AI returns one image per call. The bridge always emits `data[0]`.
+- **TTS transcoding** — `response_format` is accepted but the bridge does not transcode codecs. melotts emits WAV, aura emits MP3, and the bridge serves whichever the model produced with the right `Content-Type`.
+- **n8n's HTTP_Request tool** exposes its parameters as `properties: {}` (an empty schema). Some models (Llama 70B, Hermes 7B, depending on the prompt) refuse to call no-arg tools and reply in text. Configure the tool with explicit properties or supply enough context in the user message.
 
 ## Project layout
 
 ```
 src/
-├── index.ts        Hono router, CORS, bearer auth
-├── chat.ts         /v1/chat/completions (streaming + non-streaming)
-├── embeddings.ts   /v1/embeddings
-├── models.ts       /v1/models, /v1/models/:id
-├── mapping.ts      OpenAI → Workers AI model alias table
-└── types.ts        Shared types
+├── index.ts             Hono router, CORS, bearer auth (constant-time)
+├── ai-client.ts         Workers AI client — REST API or binding fallback
+├── chat.ts              /v1/chat/completions (stream + non-stream + tools + vision)
+├── responses.ts         /v1/responses (stream + non-stream + tools + multi-turn)
+├── embeddings.ts        /v1/embeddings
+├── audio.ts             /v1/audio/transcriptions
+├── speech.ts            /v1/audio/speech
+├── images.ts            /v1/images/generations
+├── models.ts            /v1/models, /v1/models/:id
+├── mapping.ts           OpenAI → Workers AI model alias tables + vision detection
+├── tool-call-parser.ts  Streaming <tool_call>...</tool_call> parser (Hermes/Mistral)
+├── image-inline.ts      Auto-fetch and base64-inline remote image URLs
+└── types.ts             Shared types
 ```
 
 ## License
