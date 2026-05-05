@@ -19,6 +19,28 @@ function adaptContent(content: ChatMessage["content"]): string | unknown[] {
     .join("\n");
 }
 
+// Normalize tool definitions in case a caller sends the Responses API shape
+// (`{type:"function", name, parameters}`) into chat.completions, which expects
+// the wrapped form (`{type:"function", function:{name, parameters}}`).
+function adaptTools(tools: unknown[]): unknown[] {
+  return tools.map((t: any) => {
+    if (!t || typeof t !== "object") return t;
+    if (t.type === "function" && t.function && typeof t.function === "object") return t;
+    if (t.type === "function" && (t.name || t.parameters)) {
+      return {
+        type: "function",
+        function: {
+          name: t.name,
+          description: t.description,
+          parameters: t.parameters,
+          ...(typeof t.strict === "boolean" ? { strict: t.strict } : {}),
+        },
+      };
+    }
+    return t;
+  });
+}
+
 function adaptMessages(messages: ChatMessage[]) {
   return messages.map((m) => ({
     role: m.role,
@@ -58,7 +80,8 @@ export async function handleChatCompletions(c: Context<{ Bindings: Env }>) {
   if (typeof body.frequency_penalty === "number") aiInput.frequency_penalty = body.frequency_penalty;
   if (typeof body.presence_penalty === "number") aiInput.presence_penalty = body.presence_penalty;
   if (typeof body.seed === "number") aiInput.seed = body.seed;
-  if (Array.isArray(body.tools) && body.tools.length > 0) aiInput.tools = body.tools;
+  if (Array.isArray(body.tools) && body.tools.length > 0) aiInput.tools = adaptTools(body.tools);
+  if (body.tool_choice !== undefined) aiInput.tool_choice = body.tool_choice;
   if (body.response_format) aiInput.response_format = body.response_format;
 
   const id = generateId();

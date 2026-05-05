@@ -67,6 +67,43 @@ function adaptInputToMessages(req: ResponsesRequest): Array<{ role: string; cont
   return messages;
 }
 
+// The Responses API and chat.completions disagree on the tool schema:
+//   Responses API:    { type:"function", name, description, parameters, strict? }
+//   chat.completions: { type:"function", function:{ name, description, parameters, strict? } }
+// Workers AI chat models accept the chat.completions shape, so we normalize.
+function adaptResponsesTools(tools: unknown[]): unknown[] {
+  return tools.map((t: any) => {
+    if (!t || typeof t !== "object") return t;
+    if (t.type === "function" && t.function && typeof t.function === "object") return t; // already chat shape
+    if (t.type === "function" && (t.name || t.parameters)) {
+      return {
+        type: "function",
+        function: {
+          name: t.name,
+          description: t.description,
+          parameters: t.parameters,
+          ...(typeof t.strict === "boolean" ? { strict: t.strict } : {}),
+        },
+      };
+    }
+    return t;
+  });
+}
+
+// Inverse: chat.completions tool_calls → Responses API output items.
+//   chat: [{ id, type:"function", function:{ name, arguments } }]
+//   resp: [{ type:"function_call", id, call_id, name, arguments }]
+function toolCallsToResponsesItems(toolCalls: any[]): unknown[] {
+  return toolCalls.map((tc, idx) => ({
+    type: "function_call",
+    id: tc.id ?? `fc_${idx}`,
+    call_id: tc.id ?? `call_${idx}`,
+    name: tc.function?.name ?? tc.name,
+    arguments: tc.function?.arguments ?? tc.arguments ?? "{}",
+    status: "completed",
+  }));
+}
+
 function generateResponseId(): string {
   return "resp_" + crypto.randomUUID().replace(/-/g, "").slice(0, 24);
 }
@@ -97,7 +134,8 @@ export async function handleResponses(c: Context<{ Bindings: Env }>) {
   const maxOut = body.max_output_tokens ?? body.max_tokens;
   if (typeof maxOut === "number") aiInput.max_tokens = maxOut;
   if (typeof body.seed === "number") aiInput.seed = body.seed;
-  if (Array.isArray(body.tools) && body.tools.length > 0) aiInput.tools = body.tools;
+  if (Array.isArray(body.tools) && body.tools.length > 0) aiInput.tools = adaptResponsesTools(body.tools);
+  if (body.tool_choice !== undefined) aiInput.tool_choice = body.tool_choice;
   const responseFormat = body.response_format ?? body.text?.format;
   if (responseFormat) aiInput.response_format = responseFormat;
 
@@ -126,6 +164,33 @@ export async function handleResponses(c: Context<{ Bindings: Env }>) {
       ?? "";
     const inputTokens = result?.usage?.prompt_tokens ?? 0;
     const outputTokens = result?.usage?.completion_tokens ?? 0;
+    const toolCalls = nativeChoice?.message?.tool_calls?.length
+      ? nativeChoice.message.tool_calls
+      : (Array.isArray(result?.tool_calls) && result.tool_calls.length ? result.tool_calls : null);
+
+    const output: unknown[] = [];
+    if (text) {
+      output.push({
+        type: "message",
+        id: messageId,
+        status: "completed",
+        role: "assistant",
+        content: [{ type: "output_text", text, annotations: [] }],
+      });
+    }
+    if (toolCalls) {
+      output.push(...toolCallsToResponsesItems(toolCalls));
+    }
+    if (output.length === 0) {
+      // Always include a message item, even if empty, so consumers don't crash.
+      output.push({
+        type: "message",
+        id: messageId,
+        status: "completed",
+        role: "assistant",
+        content: [{ type: "output_text", text: "", annotations: [] }],
+      });
+    }
 
     return c.json({
       id: responseId,
@@ -133,15 +198,7 @@ export async function handleResponses(c: Context<{ Bindings: Env }>) {
       created_at: created,
       status: "completed",
       model: modelLabel,
-      output: [
-        {
-          type: "message",
-          id: messageId,
-          status: "completed",
-          role: "assistant",
-          content: [{ type: "output_text", text, annotations: [] }],
-        },
-      ],
+      output,
       output_text: text,
       usage: {
         input_tokens: inputTokens,
