@@ -1,0 +1,21 @@
+name = "openai-workers-ai-bridge"
+main = "src/index.ts"
+compatibility_date = "2025-01-15"
+compatibility_flags = ["nodejs_compat"]
+
+# Workers AI binding — gives the Worker access to env.AI.run(...)
+[ai]
+binding = "AI"
+
+# Default chat model used when the OpenAI request doesn't match a known mapping.
+# Override per-deploy in the Cloudflare dashboard or via `wrangler secret put`.
+[vars]
+DEFAULT_CHAT_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+DEFAULT_EMBEDDING_MODEL = "@cf/baai/bge-m3"
+
+# Optional secret — if set, the Worker requires `Authorization: Bearer <API_KEY>`.
+# Set with: wrangler secret put API_KEY
+# (Not declared here so the deploy works without it; add the secret yourself.)
+
+[observability]
+enabled = true

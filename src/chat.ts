@@ -1,0 +1,214 @@
+import type { Context } from "hono";
+import { resolveChatModel } from "./mapping";
+import type { ChatCompletionRequest, ChatMessage, Env } from "./types";
+
+// Adapt OpenAI multi-part content for Workers AI. Text-only messages are
+// flattened to a string (what most CF chat models expect); messages that
+// include images are forwarded as the multi-part array so vision-capable
+// models (e.g. @cf/meta/llama-3.2-11b-vision-instruct) receive them intact.
+function adaptContent(content: ChatMessage["content"]): string | unknown[] {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+
+  const hasImage = content.some((p) => p && p.type === "image_url");
+  if (hasImage) return content;
+
+  return content
+    .map((part) => (part.type === "text" && part.text ? part.text : ""))
+    .filter(Boolean)
+    .join("\n");
+}
+
+function adaptMessages(messages: ChatMessage[]) {
+  return messages.map((m) => ({
+    role: m.role,
+    content: adaptContent(m.content),
+    ...(m.tool_call_id ? { tool_call_id: m.tool_call_id } : {}),
+    ...(m.tool_calls ? { tool_calls: m.tool_calls } : {}),
+  }));
+}
+
+function generateId(): string {
+  return "chatcmpl-" + crypto.randomUUID().replace(/-/g, "").slice(0, 24);
+}
+
+export async function handleChatCompletions(c: Context<{ Bindings: Env }>) {
+  let body: ChatCompletionRequest;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: { message: "Invalid JSON body", type: "invalid_request_error" } }, 400);
+  }
+
+  if (!Array.isArray(body.messages) || body.messages.length === 0) {
+    return c.json({ error: { message: "`messages` is required", type: "invalid_request_error" } }, 400);
+  }
+
+  const model = resolveChatModel(body.model, c.env.DEFAULT_CHAT_MODEL ?? "@cf/meta/llama-3.3-70b-instruct-fp8-fast");
+  const stream = body.stream === true;
+
+  const aiInput: Record<string, unknown> = {
+    messages: adaptMessages(body.messages),
+    stream,
+  };
+  if (typeof body.temperature === "number") aiInput.temperature = body.temperature;
+  if (typeof body.top_p === "number") aiInput.top_p = body.top_p;
+  if (typeof body.max_tokens === "number") aiInput.max_tokens = body.max_tokens;
+  if (typeof body.max_completion_tokens === "number") aiInput.max_tokens = body.max_completion_tokens;
+  if (typeof body.frequency_penalty === "number") aiInput.frequency_penalty = body.frequency_penalty;
+  if (typeof body.presence_penalty === "number") aiInput.presence_penalty = body.presence_penalty;
+  if (typeof body.seed === "number") aiInput.seed = body.seed;
+  if (Array.isArray(body.tools) && body.tools.length > 0) aiInput.tools = body.tools;
+  if (body.response_format) aiInput.response_format = body.response_format;
+
+  const id = generateId();
+  const created = Math.floor(Date.now() / 1000);
+
+  if (!stream) {
+    let result: any;
+    try {
+      result = await c.env.AI.run(model as keyof AiModels, aiInput as never);
+    } catch (err) {
+      return c.json(
+        { error: { message: (err as Error).message ?? "Workers AI call failed", type: "upstream_error" } },
+        502,
+      );
+    }
+
+    const text = typeof result?.response === "string" ? result.response : (result?.result?.response ?? "");
+    const toolCalls = result?.tool_calls;
+
+    return c.json({
+      id,
+      object: "chat.completion",
+      created,
+      model: body.model || model,
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            content: toolCalls ? null : text,
+            ...(toolCalls ? { tool_calls: toolCalls } : {}),
+          },
+          finish_reason: toolCalls ? "tool_calls" : "stop",
+        },
+      ],
+      usage: {
+        prompt_tokens: result?.usage?.prompt_tokens ?? 0,
+        completion_tokens: result?.usage?.completion_tokens ?? 0,
+        total_tokens: result?.usage?.total_tokens ?? 0,
+      },
+    });
+  }
+
+  // Streaming branch: convert Workers AI SSE → OpenAI SSE deltas.
+  let upstream: ReadableStream<Uint8Array>;
+  try {
+    upstream = (await c.env.AI.run(model as keyof AiModels, aiInput as never)) as unknown as ReadableStream<Uint8Array>;
+  } catch (err) {
+    return c.json(
+      { error: { message: (err as Error).message ?? "Workers AI call failed", type: "upstream_error" } },
+      502,
+    );
+  }
+
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+  const modelLabel = body.model || model;
+
+  const out = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const writeEvent = (payload: unknown) => {
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`));
+      };
+
+      // Initial role delta — many OpenAI clients expect it before any content.
+      writeEvent({
+        id,
+        object: "chat.completion.chunk",
+        created,
+        model: modelLabel,
+        choices: [{ index: 0, delta: { role: "assistant", content: "" }, finish_reason: null }],
+      });
+
+      const reader = upstream.getReader();
+      let buffer = "";
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+
+          // Parse SSE: events separated by blank lines, lines start with "data: ".
+          let sepIndex: number;
+          while ((sepIndex = buffer.indexOf("\n\n")) !== -1) {
+            const rawEvent = buffer.slice(0, sepIndex);
+            buffer = buffer.slice(sepIndex + 2);
+
+            for (const line of rawEvent.split("\n")) {
+              if (!line.startsWith("data:")) continue;
+              const data = line.slice(5).trim();
+              if (!data) continue;
+              if (data === "[DONE]") continue;
+
+              try {
+                const parsed = JSON.parse(data);
+                const token: string = parsed.response ?? parsed.delta ?? "";
+                if (token) {
+                  writeEvent({
+                    id,
+                    object: "chat.completion.chunk",
+                    created,
+                    model: modelLabel,
+                    choices: [{ index: 0, delta: { content: token }, finish_reason: null }],
+                  });
+                }
+                if (parsed.tool_calls) {
+                  writeEvent({
+                    id,
+                    object: "chat.completion.chunk",
+                    created,
+                    model: modelLabel,
+                    choices: [{ index: 0, delta: { tool_calls: parsed.tool_calls }, finish_reason: null }],
+                  });
+                }
+              } catch {
+                // Ignore malformed chunks; Workers AI occasionally emits keep-alives.
+              }
+            }
+          }
+        }
+      } catch (err) {
+        writeEvent({
+          id,
+          object: "chat.completion.chunk",
+          created,
+          model: modelLabel,
+          choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+          error: { message: (err as Error).message },
+        });
+      }
+
+      // Final stop delta + DONE sentinel.
+      writeEvent({
+        id,
+        object: "chat.completion.chunk",
+        created,
+        model: modelLabel,
+        choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+      });
+      controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+      controller.close();
+    },
+  });
+
+  return new Response(out, {
+    headers: {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+    },
+  });
+}
