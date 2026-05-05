@@ -206,9 +206,14 @@ export async function handleResponses(c: Context<{ Bindings: Env }>) {
   const aiInput: Record<string, unknown> = { messages, stream };
   if (typeof body.temperature === "number") aiInput.temperature = body.temperature;
   if (typeof body.top_p === "number") aiInput.top_p = body.top_p;
+  if (typeof (body as any).top_k === "number") aiInput.top_k = (body as any).top_k;
   const maxOut = body.max_output_tokens ?? body.max_tokens;
   if (typeof maxOut === "number") aiInput.max_tokens = maxOut;
   if (typeof body.seed === "number") aiInput.seed = body.seed;
+  if (typeof (body as any).frequency_penalty === "number") aiInput.frequency_penalty = (body as any).frequency_penalty;
+  if (typeof (body as any).presence_penalty === "number") aiInput.presence_penalty = (body as any).presence_penalty;
+  if (typeof (body as any).repetition_penalty === "number") aiInput.repetition_penalty = (body as any).repetition_penalty;
+  if ((body as any).stop !== undefined) aiInput.stop = (body as any).stop;
   if (Array.isArray(body.tools) && body.tools.length > 0) aiInput.tools = adaptResponsesTools(body.tools);
   if (body.tool_choice !== undefined) aiInput.tool_choice = body.tool_choice;
   const responseFormat = body.response_format ?? body.text?.format;

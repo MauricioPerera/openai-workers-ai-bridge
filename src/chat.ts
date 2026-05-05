@@ -76,11 +76,14 @@ export async function handleChatCompletions(c: Context<{ Bindings: Env }>) {
   };
   if (typeof body.temperature === "number") aiInput.temperature = body.temperature;
   if (typeof body.top_p === "number") aiInput.top_p = body.top_p;
+  if (typeof (body as any).top_k === "number") aiInput.top_k = (body as any).top_k;
   if (typeof body.max_tokens === "number") aiInput.max_tokens = body.max_tokens;
   if (typeof body.max_completion_tokens === "number") aiInput.max_tokens = body.max_completion_tokens;
   if (typeof body.frequency_penalty === "number") aiInput.frequency_penalty = body.frequency_penalty;
   if (typeof body.presence_penalty === "number") aiInput.presence_penalty = body.presence_penalty;
+  if (typeof (body as any).repetition_penalty === "number") aiInput.repetition_penalty = (body as any).repetition_penalty;
   if (typeof body.seed === "number") aiInput.seed = body.seed;
+  if (body.stop !== undefined) aiInput.stop = body.stop;
   if (Array.isArray(body.tools) && body.tools.length > 0) aiInput.tools = adaptTools(body.tools);
   if (body.tool_choice !== undefined) aiInput.tool_choice = body.tool_choice;
   if (body.response_format) aiInput.response_format = body.response_format;
