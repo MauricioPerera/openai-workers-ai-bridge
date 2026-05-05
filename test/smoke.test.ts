@@ -61,6 +61,24 @@ describe("OpenAI bridge smoke tests", () => {
     expect(body.data[0].embedding).toEqual([0.1, 0.2, 0.3]);
   });
 
+  it("POST /v1/responses returns Responses-API-shaped output", async () => {
+    const res = await SELF.fetch("https://example.com/v1/responses", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        input: "ping",
+        instructions: "Be terse.",
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json<any>();
+    expect(body.object).toBe("response");
+    expect(body.status).toBe("completed");
+    expect(body.output[0].role).toBe("assistant");
+    expect(body.output_text).toContain("echo: ping");
+  });
+
   it("rejects requests when API_KEY is set and bearer is missing", async () => {
     (env as any).API_KEY = "sk-test";
     const res = await SELF.fetch("https://example.com/v1/models");

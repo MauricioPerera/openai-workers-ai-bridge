@@ -4,6 +4,7 @@ import { handleTranscriptions } from "./audio";
 import { handleChatCompletions } from "./chat";
 import { handleEmbeddings } from "./embeddings";
 import { handleListModels, handleRetrieveModel } from "./models";
+import { handleResponses } from "./responses";
 import type { Env } from "./types";
 
 const app = new Hono<{ Bindings: Env }>();
@@ -45,6 +46,7 @@ app.get("/", (c) =>
     endpoints: [
       "/v1/models",
       "/v1/chat/completions",
+      "/v1/responses",
       "/v1/embeddings",
       "/v1/audio/transcriptions",
     ],
@@ -55,6 +57,7 @@ app.get("/", (c) =>
 app.get("/v1/models", handleListModels);
 app.get("/v1/models/:id{.+}", handleRetrieveModel);
 app.post("/v1/chat/completions", handleChatCompletions);
+app.post("/v1/responses", handleResponses);
 app.post("/v1/embeddings", handleEmbeddings);
 app.post("/v1/audio/transcriptions", handleTranscriptions);
 

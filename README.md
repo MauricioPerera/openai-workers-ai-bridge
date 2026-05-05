@@ -10,6 +10,7 @@ OpenAI-compatible API for **Cloudflare Workers AI**. Deploy this Worker to your 
 |---|---|---|
 | `GET  /v1/models` | ✅ | Lists OpenAI-style aliases (`gpt-4o`, `gpt-3.5-turbo`, …) plus native `@cf/...` IDs. |
 | `POST /v1/chat/completions` | ✅ | Streaming (SSE) and non-streaming. Tool/function calling passed through. Vision-capable when `image_url` parts are present. |
+| `POST /v1/responses` | ✅ | OpenAI's newer Responses API (used by recent n8n / LangChain.js / OpenAI SDK helpers). Streaming + non-streaming. |
 | `POST /v1/embeddings` | ✅ | Single string or array. Returns OpenAI shape. |
 | `POST /v1/audio/transcriptions` | ✅ | Multipart upload → Whisper (`@cf/openai/whisper` or `whisper-large-v3-turbo`). Supports `json`, `text`, `verbose_json`, `vtt`. |
 
