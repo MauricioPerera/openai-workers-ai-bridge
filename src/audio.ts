@@ -1,4 +1,5 @@
 import type { Context } from "hono";
+import { runAI } from "./ai-client";
 import type { Env } from "./types";
 
 const WHISPER_ALIASES: Record<string, string> = {
@@ -55,7 +56,7 @@ export async function handleTranscriptions(c: Context<{ Bindings: Env }>) {
 
   let result: any;
   try {
-    result = await c.env.AI.run(model as keyof AiModels, aiInput as never);
+    result = await runAI(c.env, model, aiInput);
   } catch (err) {
     return c.json(
       { error: { message: (err as Error).message ?? "Workers AI call failed", type: "upstream_error" } },

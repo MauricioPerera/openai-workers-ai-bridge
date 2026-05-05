@@ -19,15 +19,20 @@ const EMBEDDING_ALIASES: Record<string, string> = {
   "text-embedding-3-large": "@cf/baai/bge-large-en-v1.5",
 };
 
+// Workers AI model IDs use a `@<provider>/<name>` shape — e.g. `@cf/...`,
+// `@hf/...`. Pass through anything that looks like a native provider ID so
+// callers can target any model the account has access to.
+const NATIVE_ID_RE = /^@[a-z0-9-]+\//i;
+
 export function resolveChatModel(requested: string, fallback: string): string {
   if (!requested) return fallback;
-  if (requested.startsWith("@cf/")) return requested;
+  if (NATIVE_ID_RE.test(requested)) return requested;
   return CHAT_ALIASES[requested] ?? fallback;
 }
 
 export function resolveEmbeddingModel(requested: string, fallback: string): string {
   if (!requested) return fallback;
-  if (requested.startsWith("@cf/")) return requested;
+  if (NATIVE_ID_RE.test(requested)) return requested;
   return EMBEDDING_ALIASES[requested] ?? fallback;
 }
 

@@ -1,4 +1,5 @@
 import type { Context } from "hono";
+import { runAI } from "./ai-client";
 import { resolveEmbeddingModel } from "./mapping";
 import type { EmbeddingsRequest, Env } from "./types";
 
@@ -23,7 +24,7 @@ export async function handleEmbeddings(c: Context<{ Bindings: Env }>) {
 
   let result: any;
   try {
-    result = await c.env.AI.run(model as keyof AiModels, { text: inputs } as never);
+    result = await runAI(c.env, model, { text: inputs });
   } catch (err) {
     return c.json(
       { error: { message: (err as Error).message ?? "Workers AI call failed", type: "upstream_error" } },

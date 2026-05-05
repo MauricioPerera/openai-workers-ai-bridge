@@ -1,4 +1,5 @@
 import type { Context } from "hono";
+import { runAI } from "./ai-client";
 import { resolveChatModel } from "./mapping";
 import type { ChatCompletionRequest, ChatMessage, Env } from "./types";
 
@@ -90,7 +91,7 @@ export async function handleChatCompletions(c: Context<{ Bindings: Env }>) {
   if (!stream) {
     let result: any;
     try {
-      result = await c.env.AI.run(model as keyof AiModels, aiInput as never);
+      result = await runAI(c.env, model, aiInput);
     } catch (err) {
       return c.json(
         { error: { message: (err as Error).message ?? "Workers AI call failed", type: "upstream_error" } },
@@ -140,7 +141,7 @@ export async function handleChatCompletions(c: Context<{ Bindings: Env }>) {
   // Streaming branch: convert Workers AI SSE → OpenAI SSE deltas.
   let upstream: ReadableStream<Uint8Array>;
   try {
-    upstream = (await c.env.AI.run(model as keyof AiModels, aiInput as never)) as unknown as ReadableStream<Uint8Array>;
+    upstream = (await runAI(c.env, model, aiInput, { stream: true })) as ReadableStream<Uint8Array>;
   } catch (err) {
     return c.json(
       { error: { message: (err as Error).message ?? "Workers AI call failed", type: "upstream_error" } },

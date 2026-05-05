@@ -3,6 +3,11 @@ export interface Env {
   DEFAULT_CHAT_MODEL?: string;
   DEFAULT_EMBEDDING_MODEL?: string;
   API_KEY?: string;
+  // Optional — if set, the bridge calls Workers AI via the REST API instead
+  // of the AI binding. Strongly recommended: the binding has been observed
+  // to ignore tool definitions in some Hono-routed contexts (Hermes, Llama 70B).
+  CLOUDFLARE_TOKEN?: string;
+  CLOUDFLARE_ACCOUNT_ID?: string;
 }
 
 export interface ChatMessage {
