@@ -107,9 +107,9 @@ export async function handleChatCompletions(c: Context<{ Bindings: Env }>) {
     //   - OpenAI-native (IBM Granite, DeepSeek-R1, newer models):
     //       { choices: [{ message: { content, tool_calls } , finish_reason }], usage }
     const nativeChoice = Array.isArray(result?.choices) ? result.choices[0] : null;
-    const text = nativeChoice?.message?.content
-      ?? (typeof result?.response === "string" ? result.response : "")
-      ?? result?.result?.response
+    const text: string = nativeChoice?.message?.content
+      ?? (typeof result?.response === "string" ? result.response : null)
+      ?? (typeof result?.result?.response === "string" ? result.result.response : null)
       ?? "";
     const toolCalls = nativeChoice?.message?.tool_calls?.length
       ? nativeChoice.message.tool_calls
@@ -173,6 +173,9 @@ export async function handleChatCompletions(c: Context<{ Bindings: Env }>) {
 
       const reader = upstream.getReader();
       let buffer = "";
+      let sawToolCalls = false;
+      let upstreamFinishReason: string | null = null;
+      let upstreamUsage: any = null;
       try {
         while (true) {
           const { done, value } = await reader.read();
@@ -194,11 +197,15 @@ export async function handleChatCompletions(c: Context<{ Bindings: Env }>) {
               try {
                 const parsed = JSON.parse(data);
                 // Two upstream shapes:
-                //   Legacy: { response: "token", tool_calls?, p? }
-                //   OpenAI-native (Granite/DeepSeek-R1): { choices:[{ delta:{ content, tool_calls } }] }
-                const nativeDelta = Array.isArray(parsed.choices) ? parsed.choices[0]?.delta : null;
+                //   Legacy: { response: "token", tool_calls?, p?, usage? }
+                //   OpenAI-native (Granite/DeepSeek-R1): { choices:[{ delta:{ content, tool_calls }, finish_reason }], usage? }
+                const nativeChoice = Array.isArray(parsed.choices) ? parsed.choices[0] : null;
+                const nativeDelta = nativeChoice?.delta ?? null;
                 const token: string = nativeDelta?.content ?? parsed.response ?? parsed.delta ?? "";
                 const deltaToolCalls = nativeDelta?.tool_calls ?? parsed.tool_calls;
+
+                if (parsed.usage) upstreamUsage = parsed.usage;
+                if (nativeChoice?.finish_reason) upstreamFinishReason = nativeChoice.finish_reason;
 
                 if (token) {
                   writeEvent({
@@ -210,12 +217,26 @@ export async function handleChatCompletions(c: Context<{ Bindings: Env }>) {
                   });
                 }
                 if (deltaToolCalls && deltaToolCalls.length) {
+                  sawToolCalls = true;
+                  // Normalize legacy `[{name, arguments}]` into chat.completions delta shape.
+                  const normalized = deltaToolCalls.map((tc: any, idx: number) => {
+                    if (tc?.function) return { index: tc.index ?? idx, ...tc };
+                    return {
+                      index: idx,
+                      id: tc.id ?? `call_${idx}`,
+                      type: "function",
+                      function: {
+                        name: tc.name,
+                        arguments: typeof tc.arguments === "string" ? tc.arguments : JSON.stringify(tc.arguments ?? {}),
+                      },
+                    };
+                  });
                   writeEvent({
                     id,
                     object: "chat.completion.chunk",
                     created,
                     model: modelLabel,
-                    choices: [{ index: 0, delta: { tool_calls: deltaToolCalls }, finish_reason: null }],
+                    choices: [{ index: 0, delta: { tool_calls: normalized }, finish_reason: null }],
                   });
                 }
               } catch {
@@ -225,24 +246,28 @@ export async function handleChatCompletions(c: Context<{ Bindings: Env }>) {
           }
         }
       } catch (err) {
-        writeEvent({
-          id,
-          object: "chat.completion.chunk",
-          created,
-          model: modelLabel,
-          choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
-          error: { message: (err as Error).message },
-        });
+        // Stream broke mid-flight. Best we can do per the OpenAI streaming
+        // shape: log, emit a clean stop chunk, and close. The error field on
+        // a delta chunk is non-standard and breaks some clients.
+        console.error("[/v1/chat] stream error:", (err as Error).message);
       }
 
-      // Final stop delta + DONE sentinel.
-      writeEvent({
+      const finishReason = upstreamFinishReason ?? (sawToolCalls ? "tool_calls" : "stop");
+      const finalChunk: Record<string, unknown> = {
         id,
         object: "chat.completion.chunk",
         created,
         model: modelLabel,
-        choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
-      });
+        choices: [{ index: 0, delta: {}, finish_reason: finishReason }],
+      };
+      if (upstreamUsage) {
+        finalChunk.usage = {
+          prompt_tokens: upstreamUsage.prompt_tokens ?? 0,
+          completion_tokens: upstreamUsage.completion_tokens ?? 0,
+          total_tokens: upstreamUsage.total_tokens ?? (upstreamUsage.prompt_tokens ?? 0) + (upstreamUsage.completion_tokens ?? 0),
+        };
+      }
+      writeEvent(finalChunk);
       controller.enqueue(encoder.encode("data: [DONE]\n\n"));
       controller.close();
     },

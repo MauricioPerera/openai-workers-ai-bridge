@@ -239,8 +239,8 @@ export async function handleResponses(c: Context<{ Bindings: Env }>) {
     // OpenAI-native `choices[].message.content` (Granite, DeepSeek-R1, ...).
     const nativeChoice = Array.isArray(result?.choices) ? result.choices[0] : null;
     const text: string = nativeChoice?.message?.content
-      ?? (typeof result?.response === "string" ? result.response : "")
-      ?? result?.result?.response
+      ?? (typeof result?.response === "string" ? result.response : null)
+      ?? (typeof result?.result?.response === "string" ? result.result.response : null)
       ?? "";
     const inputTokens = result?.usage?.prompt_tokens ?? 0;
     const outputTokens = result?.usage?.completion_tokens ?? 0;
@@ -330,29 +330,80 @@ export async function handleResponses(c: Context<{ Bindings: Env }>) {
       writeEvent("response.created", { type: "response.created", response: initialResponse });
       writeEvent("response.in_progress", { type: "response.in_progress", response: initialResponse });
 
-      const itemAdded = {
-        type: "message",
-        id: messageId,
-        status: "in_progress",
-        role: "assistant",
-        content: [],
+      // Lazily emit the message-item lifecycle so we don't ship an empty
+      // message when the model only produces tool calls.
+      let messageStarted = false;
+      let messageOutputIndex = -1;
+      let nextOutputIndex = 0;
+      const startMessageItem = () => {
+        if (messageStarted) return;
+        messageOutputIndex = nextOutputIndex++;
+        messageStarted = true;
+        writeEvent("response.output_item.added", {
+          type: "response.output_item.added",
+          output_index: messageOutputIndex,
+          item: { type: "message", id: messageId, status: "in_progress", role: "assistant", content: [] },
+        });
+        writeEvent("response.content_part.added", {
+          type: "response.content_part.added",
+          item_id: messageId,
+          output_index: messageOutputIndex,
+          content_index: 0,
+          part: { type: "output_text", text: "", annotations: [] },
+        });
       };
-      writeEvent("response.output_item.added", {
-        type: "response.output_item.added",
-        output_index: 0,
-        item: itemAdded,
-      });
-      writeEvent("response.content_part.added", {
-        type: "response.content_part.added",
-        item_id: messageId,
-        output_index: 0,
-        content_index: 0,
-        part: { type: "output_text", text: "", annotations: [] },
-      });
+
+      // Aggregate tool calls by index across chunks. Each tool call produces
+      // its own output item with the function_call.* event lifecycle.
+      type ToolCallAcc = {
+        outputIndex: number;
+        itemId: string;
+        callId: string;
+        name: string;
+        argsBuffer: string;
+        added: boolean;
+      };
+      const toolCalls = new Map<number, ToolCallAcc>();
 
       const reader = upstream.getReader();
       let buffer = "";
       let fullText = "";
+      let upstreamUsage: any = null;
+
+      const ensureToolCallStarted = (idx: number, id: string | undefined, name: string | undefined): ToolCallAcc => {
+        let acc = toolCalls.get(idx);
+        if (!acc) {
+          acc = {
+            outputIndex: nextOutputIndex++,
+            itemId: "fc_" + crypto.randomUUID().replace(/-/g, "").slice(0, 24),
+            callId: id ?? `call_${idx}`,
+            name: name ?? "",
+            argsBuffer: "",
+            added: false,
+          };
+          toolCalls.set(idx, acc);
+        } else if (id && !acc.callId.startsWith("call_")) {
+          acc.callId = id;
+        }
+        if (name && !acc.name) acc.name = name;
+        if (!acc.added && acc.name) {
+          writeEvent("response.output_item.added", {
+            type: "response.output_item.added",
+            output_index: acc.outputIndex,
+            item: {
+              type: "function_call",
+              id: acc.itemId,
+              call_id: acc.callId,
+              name: acc.name,
+              arguments: "",
+              status: "in_progress",
+            },
+          });
+          acc.added = true;
+        }
+        return acc;
+      };
+
       try {
         while (true) {
           const { done, value } = await reader.read();
@@ -372,15 +423,42 @@ export async function handleResponses(c: Context<{ Bindings: Env }>) {
                 const parsed = JSON.parse(data);
                 const nativeDelta = Array.isArray(parsed.choices) ? parsed.choices[0]?.delta : null;
                 const token: string = nativeDelta?.content ?? parsed.response ?? parsed.delta ?? "";
+                if (parsed.usage) upstreamUsage = parsed.usage;
+
                 if (token) {
+                  startMessageItem();
                   fullText += token;
                   writeEvent("response.output_text.delta", {
                     type: "response.output_text.delta",
                     item_id: messageId,
-                    output_index: 0,
+                    output_index: messageOutputIndex,
                     content_index: 0,
                     delta: token,
                   });
+                }
+
+                // Tool calls — both shapes:
+                //   OpenAI native delta: { tool_calls:[{index, id?, function:{name?, arguments?}}] }
+                //   Legacy CF: top-level tool_calls:[{name, arguments}]
+                const deltaTcs = nativeDelta?.tool_calls ?? parsed.tool_calls;
+                if (Array.isArray(deltaTcs) && deltaTcs.length) {
+                  for (let i = 0; i < deltaTcs.length; i++) {
+                    const tc: any = deltaTcs[i];
+                    const idx = typeof tc.index === "number" ? tc.index : i;
+                    const fnName = tc.function?.name ?? tc.name;
+                    const acc = ensureToolCallStarted(idx, tc.id, fnName);
+                    const argsChunk =
+                      tc.function?.arguments ?? (typeof tc.arguments === "string" ? tc.arguments : tc.arguments ? JSON.stringify(tc.arguments) : "");
+                    if (argsChunk) {
+                      acc.argsBuffer += argsChunk;
+                      writeEvent("response.function_call_arguments.delta", {
+                        type: "response.function_call_arguments.delta",
+                        item_id: acc.itemId,
+                        output_index: acc.outputIndex,
+                        delta: argsChunk,
+                      });
+                    }
+                  }
                 }
               } catch {
                 // Ignore malformed chunks.
@@ -393,44 +471,87 @@ export async function handleResponses(c: Context<{ Bindings: Env }>) {
           type: "response.failed",
           response: { ...initialResponse, status: "failed", error: { message: (err as Error).message } },
         });
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
         controller.close();
         return;
       }
 
-      writeEvent("response.output_text.done", {
-        type: "response.output_text.done",
-        item_id: messageId,
-        output_index: 0,
-        content_index: 0,
-        text: fullText,
-      });
-      writeEvent("response.content_part.done", {
-        type: "response.content_part.done",
-        item_id: messageId,
-        output_index: 0,
-        content_index: 0,
-        part: { type: "output_text", text: fullText, annotations: [] },
-      });
-      const finalItem = {
-        type: "message",
-        id: messageId,
-        status: "completed",
-        role: "assistant",
-        content: [{ type: "output_text", text: fullText, annotations: [] }],
+      // Close the message item only if we actually started one.
+      const hasText = fullText.length > 0;
+      let finalMessageItem: unknown = null;
+      if (messageStarted) {
+        writeEvent("response.output_text.done", {
+          type: "response.output_text.done",
+          item_id: messageId,
+          output_index: messageOutputIndex,
+          content_index: 0,
+          text: fullText,
+        });
+        writeEvent("response.content_part.done", {
+          type: "response.content_part.done",
+          item_id: messageId,
+          output_index: messageOutputIndex,
+          content_index: 0,
+          part: { type: "output_text", text: fullText, annotations: [] },
+        });
+        finalMessageItem = {
+          type: "message",
+          id: messageId,
+          status: "completed",
+          role: "assistant",
+          content: [{ type: "output_text", text: fullText, annotations: [] }],
+        };
+        writeEvent("response.output_item.done", {
+          type: "response.output_item.done",
+          output_index: messageOutputIndex,
+          item: finalMessageItem,
+        });
+      }
+
+      // Close each tool call.
+      const finalToolItems: unknown[] = [];
+      for (const acc of toolCalls.values()) {
+        // Some upstream shapes deliver `arguments` as an object up front, not
+        // streamed; ensure a final args.done event with whatever we have.
+        const finalArgs = normalizeArguments(acc.argsBuffer || "{}");
+        writeEvent("response.function_call_arguments.done", {
+          type: "response.function_call_arguments.done",
+          item_id: acc.itemId,
+          output_index: acc.outputIndex,
+          arguments: finalArgs,
+        });
+        const item = {
+          type: "function_call",
+          id: acc.itemId,
+          call_id: acc.callId,
+          name: acc.name,
+          arguments: finalArgs,
+          status: "completed",
+        };
+        finalToolItems.push(item);
+        writeEvent("response.output_item.done", {
+          type: "response.output_item.done",
+          output_index: acc.outputIndex,
+          item,
+        });
+      }
+
+      const usage = {
+        input_tokens: upstreamUsage?.prompt_tokens ?? 0,
+        output_tokens: upstreamUsage?.completion_tokens ?? 0,
+        total_tokens: upstreamUsage?.total_tokens
+          ?? (upstreamUsage?.prompt_tokens ?? 0) + (upstreamUsage?.completion_tokens ?? 0),
       };
-      writeEvent("response.output_item.done", {
-        type: "response.output_item.done",
-        output_index: 0,
-        item: finalItem,
-      });
+      const finalOutput = [...(finalMessageItem ? [finalMessageItem] : []), ...finalToolItems];
+
       writeEvent("response.completed", {
         type: "response.completed",
         response: {
           ...initialResponse,
           status: "completed",
-          output: [finalItem],
+          output: finalOutput,
           output_text: fullText,
-          usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+          usage,
         },
       });
       controller.enqueue(encoder.encode("data: [DONE]\n\n"));

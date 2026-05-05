@@ -17,6 +17,15 @@ app.use("*", cors({
   maxAge: 86400,
 }));
 
+// Constant-time string compare. Across HTTPS the timing channel is dominated
+// by network jitter, but cheap defense-in-depth that costs us nothing.
+function safeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
 // Bearer-token auth. Skipped only when API_KEY is not configured (open mode).
 app.use("/v1/*", async (c, next) => {
   const expected = c.env.API_KEY;
@@ -24,7 +33,7 @@ app.use("/v1/*", async (c, next) => {
 
   const header = c.req.header("Authorization") ?? "";
   const provided = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
-  if (provided !== expected) {
+  if (!safeEqual(provided, expected)) {
     return c.json(
       {
         error: {
