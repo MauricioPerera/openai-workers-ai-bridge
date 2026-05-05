@@ -338,6 +338,57 @@ describe("OpenAI bridge smoke tests", () => {
     for (const item of body.data) expect(item.embedding).toEqual([0.1, 0.2, 0.3]);
   });
 
+  it("embeddings: dimensions truncates Matryoshka model + renormalizes to unit length", async () => {
+    // Stub returns a 768-dim vector with predictable, varying values.
+    (env as any).AI = {
+      run: async (model: string, input: any) => {
+        const texts: string[] = input.text;
+        return {
+          data: texts.map(() => Array.from({ length: 768 }, (_, i) => (i + 1) / 768)),
+        };
+      },
+    };
+    const res = await SELF.fetch("https://example.com/v1/embeddings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "embeddinggemma", input: "x", dimensions: 256 }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json<any>();
+    const vec: number[] = body.data[0].embedding;
+    expect(vec).toHaveLength(256);
+    const norm = Math.sqrt(vec.reduce((s, v) => s + v * v, 0));
+    expect(norm).toBeCloseTo(1, 5);
+  });
+
+  it("embeddings: dimensions on a non-Matryoshka model returns 400", async () => {
+    (env as any).AI = {
+      run: async () => ({ data: [[0.1, 0.2, 0.3]] }),
+    };
+    const res = await SELF.fetch("https://example.com/v1/embeddings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "@cf/baai/bge-small-en-v1.5",
+        input: "x",
+        dimensions: 128,
+      }),
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json<any>();
+    expect(body.error.message).toContain("not a Matryoshka");
+  });
+
+  it("embeddings: dimensions out of range returns 400", async () => {
+    (env as any).AI = { run: async () => ({ data: [Array(768).fill(0)] }) };
+    const res = await SELF.fetch("https://example.com/v1/embeddings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "embeddinggemma", input: "x", dimensions: 9999 }),
+    });
+    expect(res.status).toBe(400);
+  });
+
   it("rejects requests when API_KEY is set and bearer is missing", async () => {
     (env as any).API_KEY = "sk-test";
     const res = await SELF.fetch("https://example.com/v1/models");

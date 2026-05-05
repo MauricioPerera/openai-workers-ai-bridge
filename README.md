@@ -160,18 +160,38 @@ const img = await client.images.generate({
 });
 ```
 
-## Embeddings — dimension warning
+## Embeddings — dimensions, Matryoshka, and the OpenAI mismatch
 
 Workers AI's BGE family does **not** match OpenAI's embedding dimensions. If you have vectors stored from OpenAI and try to query through this bridge, similarity scores will be wrong (different vector spaces, different dimensions).
 
-| Alias | Routes to | Dimensions |
-|---|---|---|
-| `text-embedding-3-small` | `@cf/baai/bge-small-en-v1.5` | 384 *(OpenAI: 1536)* |
-| `text-embedding-3-large` | `@cf/baai/bge-large-en-v1.5` | 1024 *(OpenAI: 3072)* |
-| `text-embedding-ada-002` | `@cf/baai/bge-base-en-v1.5` | 768 *(OpenAI: 1536)* |
-| `@cf/baai/bge-m3` | (default) | 1024 |
+| Alias | Routes to | Native dim | OpenAI native |
+|---|---|---|---|
+| `text-embedding-ada-002` | `@cf/baai/bge-base-en-v1.5` | 768 | 1536 |
+| `text-embedding-3-small` | `@cf/baai/bge-small-en-v1.5` | 384 | 1536 |
+| `text-embedding-3-large` | `@cf/baai/bge-large-en-v1.5` | 1024 | 3072 |
+| `embeddinggemma` / `gemma-embedding` | `@cf/google/embeddinggemma-300m` | 768 | — |
 
-Either re-embed your existing corpus through this bridge once, or target a Workers AI embedding model directly with `@cf/baai/...`.
+Either re-embed your existing corpus through this bridge once, or target a Workers AI embedding model directly with `@cf/...`.
+
+### Matryoshka truncation (`dimensions` parameter)
+
+Three Workers AI embedding models are trained with Matryoshka representation learning, which means a prefix of the vector is still a valid embedding in the same semantic space. The bridge supports OpenAI's `dimensions` parameter against these models — it truncates to the requested size and L2-renormalizes so cosine similarity stays consistent.
+
+| Model | Native | Recommended tiers |
+|---|---|---|
+| `@cf/google/embeddinggemma-300m` | 768 | 128, 256, 512, 768 |
+| `@cf/baai/bge-m3` | 1024 | 256, 512, 1024 |
+| `@cf/qwen/qwen3-embedding-0.6b` | 1024 | 256, 512, 1024 |
+
+```bash
+curl .../v1/embeddings \
+  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"model":"embeddinggemma","input":"...","dimensions":256}'
+```
+
+Sending `dimensions` to a non-Matryoshka model (BGE small/base/large) returns a 400 with an explanation — the prefix of those vectors is meaningless and silently truncating would corrupt your corpus.
+
+EmbeddingGemma is multilingual (100+ languages) and currently the strongest small embedder on Workers AI for cross-lingual retrieval.
 
 ## Configuration
 

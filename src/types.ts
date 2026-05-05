@@ -58,5 +58,8 @@ export interface EmbeddingsRequest {
   model: string;
   input: string | string[];
   encoding_format?: "float" | "base64";
+  // Matryoshka truncation (OpenAI-compat). Only honoured for models trained
+  // with Matryoshka representation learning — otherwise rejected.
+  dimensions?: number;
   user?: string;
 }

@@ -1,7 +1,21 @@
 import type { Context } from "hono";
 import { runAI } from "./ai-client";
-import { resolveEmbeddingModel } from "./mapping";
+import { getMatryoshkaInfo, resolveEmbeddingModel } from "./mapping";
 import type { EmbeddingsRequest, Env } from "./types";
+
+// Matryoshka truncation: take the first `dim` components and re-normalize so
+// the result has unit L2 norm. EmbeddingGemma (and other Matryoshka-trained
+// models) are designed so that this prefix is still a valid embedding in the
+// same semantic space.
+function truncateAndRenormalize(vec: number[], dim: number): number[] {
+  const head = vec.slice(0, dim);
+  let sumSq = 0;
+  for (let i = 0; i < head.length; i++) sumSq += head[i] * head[i];
+  if (sumSq === 0) return head;
+  const norm = Math.sqrt(sumSq);
+  for (let i = 0; i < head.length; i++) head[i] = head[i] / norm;
+  return head;
+}
 
 // Embeddings are deterministic for a given (model, text) pair. Cache them in
 // the Worker's edge cache so repeated calls (RAG pipelines, n8n loops) don't
@@ -67,8 +81,43 @@ export async function handleEmbeddings(c: Context<{ Bindings: Env }>) {
 
   const model = resolveEmbeddingModel(body.model, c.env.DEFAULT_EMBEDDING_MODEL ?? "@cf/baai/bge-m3");
 
+  // Validate the OpenAI-compat `dimensions` parameter against this model's
+  // Matryoshka tiers. Only models trained with Matryoshka representation
+  // learning can be safely truncated; anything else gets a 400.
+  const matryoshka = getMatryoshkaInfo(model);
+  let targetDim: number | null = null;
+  if (typeof body.dimensions === "number") {
+    if (!matryoshka) {
+      return c.json(
+        {
+          error: {
+            message: `Model ${model} is not a Matryoshka embedding model and does not support the \`dimensions\` parameter. Drop the field or pick a Matryoshka model (embeddinggemma-300m, bge-m3, qwen3-embedding-0.6b).`,
+            type: "invalid_request_error",
+          },
+        },
+        400,
+      );
+    }
+    if (body.dimensions < 1 || body.dimensions > matryoshka.nativeDim) {
+      return c.json(
+        {
+          error: {
+            message: `\`dimensions\` must be between 1 and ${matryoshka.nativeDim} for ${model}. Trained tiers: ${matryoshka.tiers.join(", ")}.`,
+            type: "invalid_request_error",
+          },
+        },
+        400,
+      );
+    }
+    targetDim = body.dimensions;
+  }
+
+  // Cache the *truncated* output, not the native one. Different `dimensions`
+  // values produce different vectors, so the cache key must distinguish them.
+  const cacheModelKey = targetDim ? `${model}@${targetDim}` : model;
+
   // Check cache for each input; collect misses for a single upstream call.
-  const cached = await Promise.all(inputs.map((t) => readCached(model, t)));
+  const cached = await Promise.all(inputs.map((t) => readCached(cacheModelKey, t)));
   const misses: { idx: number; text: string }[] = [];
   cached.forEach((v, i) => {
     if (!v) misses.push({ idx: i, text: inputs[i] });
@@ -93,10 +142,13 @@ export async function handleEmbeddings(c: Context<{ Bindings: Env }>) {
       );
     }
     // Stitch fresh vectors back into the cached array and prime the cache.
+    // Apply Matryoshka truncation here so the cached value already has the
+    // right shape and a second hit doesn't re-truncate.
     await Promise.all(
       misses.map(async (m, i) => {
-        cached[m.idx] = fresh[i];
-        await writeCached(model, m.text, fresh[i]);
+        const vec = targetDim ? truncateAndRenormalize(fresh[i], targetDim) : fresh[i];
+        cached[m.idx] = vec;
+        await writeCached(cacheModelKey, m.text, vec);
       }),
     );
   }

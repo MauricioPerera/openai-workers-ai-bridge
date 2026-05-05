@@ -32,6 +32,11 @@ const EMBEDDING_ALIASES: Record<string, string> = {
   "text-embedding-ada-002": "@cf/baai/bge-base-en-v1.5",
   "text-embedding-3-small": "@cf/baai/bge-small-en-v1.5",
   "text-embedding-3-large": "@cf/baai/bge-large-en-v1.5",
+  // Newer multilingual + Matryoshka aliases
+  "embeddinggemma": "@cf/google/embeddinggemma-300m",
+  "embeddinggemma-300m": "@cf/google/embeddinggemma-300m",
+  "gemma-embedding": "@cf/google/embeddinggemma-300m",
+  "gemini-embedding": "@cf/google/embeddinggemma-300m",
 };
 
 // Workers AI model IDs use a `@<provider>/<name>` shape — e.g. `@cf/...`,
@@ -63,6 +68,25 @@ export function isReasoningModel(id: string | undefined | null): boolean {
   if (!id) return false;
   const lower = id.toLowerCase();
   return REASONING_ID_HINTS.some((hint) => lower.includes(hint));
+}
+
+// Matryoshka embedding models can be safely truncated to a prefix of their
+// native dimension and re-normalized; the resulting vector is still a valid
+// embedding in the same space (just lower fidelity). Non-Matryoshka models
+// must NOT be truncated like this — the prefix is meaningless.
+//
+// Native dims and supported truncation tiers per model:
+//   embeddinggemma-300m (Google):  native 768, supports 128 / 256 / 512 / 768
+//   bge-m3 (BAAI):                 native 1024, supports 256 / 512 / 1024
+//   qwen3-embedding-0.6b:          native 1024, supports 256 / 512 / 1024
+const MATRYOSHKA_MODELS: Record<string, { nativeDim: number; tiers: number[] }> = {
+  "@cf/google/embeddinggemma-300m": { nativeDim: 768, tiers: [128, 256, 512, 768] },
+  "@cf/baai/bge-m3":                { nativeDim: 1024, tiers: [256, 512, 1024] },
+  "@cf/qwen/qwen3-embedding-0.6b":  { nativeDim: 1024, tiers: [256, 512, 1024] },
+};
+
+export function getMatryoshkaInfo(id: string): { nativeDim: number; tiers: number[] } | null {
+  return MATRYOSHKA_MODELS[id] ?? null;
 }
 
 export function resolveChatModel(requested: string, fallback: string): string {
@@ -120,10 +144,13 @@ export const ADVERTISED_MODELS: string[] = [
   "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b",
   "@hf/nousresearch/hermes-2-pro-mistral-7b",
   // Embeddings
+  "embeddinggemma-300m",
+  "@cf/google/embeddinggemma-300m",
   "@cf/baai/bge-m3",
   "@cf/baai/bge-large-en-v1.5",
   "@cf/baai/bge-base-en-v1.5",
   "@cf/baai/bge-small-en-v1.5",
+  "@cf/qwen/qwen3-embedding-0.6b",
   // Audio
   "@cf/openai/whisper",
   "@cf/openai/whisper-large-v3-turbo",
