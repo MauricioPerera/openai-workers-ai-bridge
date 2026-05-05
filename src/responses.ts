@@ -117,7 +117,13 @@ export async function handleResponses(c: Context<{ Bindings: Env }>) {
       );
     }
 
-    const text: string = typeof result?.response === "string" ? result.response : (result?.result?.response ?? "");
+    // Same dual-shape handling as chat.ts: legacy `response` field vs.
+    // OpenAI-native `choices[].message.content` (Granite, DeepSeek-R1, ...).
+    const nativeChoice = Array.isArray(result?.choices) ? result.choices[0] : null;
+    const text: string = nativeChoice?.message?.content
+      ?? (typeof result?.response === "string" ? result.response : "")
+      ?? result?.result?.response
+      ?? "";
     const inputTokens = result?.usage?.prompt_tokens ?? 0;
     const outputTokens = result?.usage?.completion_tokens ?? 0;
 
@@ -227,7 +233,8 @@ export async function handleResponses(c: Context<{ Bindings: Env }>) {
               if (!data || data === "[DONE]") continue;
               try {
                 const parsed = JSON.parse(data);
-                const token: string = parsed.response ?? parsed.delta ?? "";
+                const nativeDelta = Array.isArray(parsed.choices) ? parsed.choices[0]?.delta : null;
+                const token: string = nativeDelta?.content ?? parsed.response ?? parsed.delta ?? "";
                 if (token) {
                   fullText += token;
                   writeEvent("response.output_text.delta", {

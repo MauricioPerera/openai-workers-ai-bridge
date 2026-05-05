@@ -75,8 +75,20 @@ export async function handleChatCompletions(c: Context<{ Bindings: Env }>) {
       );
     }
 
-    const text = typeof result?.response === "string" ? result.response : (result?.result?.response ?? "");
-    const toolCalls = result?.tool_calls;
+    // Workers AI returns one of two shapes depending on the model:
+    //   - Legacy (Llama/Mistral/...): { response: "text", tool_calls?, usage? }
+    //   - OpenAI-native (IBM Granite, DeepSeek-R1, newer models):
+    //       { choices: [{ message: { content, tool_calls } , finish_reason }], usage }
+    const nativeChoice = Array.isArray(result?.choices) ? result.choices[0] : null;
+    const text = nativeChoice?.message?.content
+      ?? (typeof result?.response === "string" ? result.response : "")
+      ?? result?.result?.response
+      ?? "";
+    const toolCalls = nativeChoice?.message?.tool_calls?.length
+      ? nativeChoice.message.tool_calls
+      : (result?.tool_calls?.length ? result.tool_calls : undefined);
+    const finishReason = nativeChoice?.finish_reason ?? (toolCalls ? "tool_calls" : "stop");
+    const usage = result?.usage ?? {};
 
     return c.json({
       id,
@@ -91,13 +103,13 @@ export async function handleChatCompletions(c: Context<{ Bindings: Env }>) {
             content: toolCalls ? null : text,
             ...(toolCalls ? { tool_calls: toolCalls } : {}),
           },
-          finish_reason: toolCalls ? "tool_calls" : "stop",
+          finish_reason: finishReason,
         },
       ],
       usage: {
-        prompt_tokens: result?.usage?.prompt_tokens ?? 0,
-        completion_tokens: result?.usage?.completion_tokens ?? 0,
-        total_tokens: result?.usage?.total_tokens ?? 0,
+        prompt_tokens: usage.prompt_tokens ?? 0,
+        completion_tokens: usage.completion_tokens ?? 0,
+        total_tokens: usage.total_tokens ?? (usage.prompt_tokens ?? 0) + (usage.completion_tokens ?? 0),
       },
     });
   }
@@ -154,7 +166,13 @@ export async function handleChatCompletions(c: Context<{ Bindings: Env }>) {
 
               try {
                 const parsed = JSON.parse(data);
-                const token: string = parsed.response ?? parsed.delta ?? "";
+                // Two upstream shapes:
+                //   Legacy: { response: "token", tool_calls?, p? }
+                //   OpenAI-native (Granite/DeepSeek-R1): { choices:[{ delta:{ content, tool_calls } }] }
+                const nativeDelta = Array.isArray(parsed.choices) ? parsed.choices[0]?.delta : null;
+                const token: string = nativeDelta?.content ?? parsed.response ?? parsed.delta ?? "";
+                const deltaToolCalls = nativeDelta?.tool_calls ?? parsed.tool_calls;
+
                 if (token) {
                   writeEvent({
                     id,
@@ -164,13 +182,13 @@ export async function handleChatCompletions(c: Context<{ Bindings: Env }>) {
                     choices: [{ index: 0, delta: { content: token }, finish_reason: null }],
                   });
                 }
-                if (parsed.tool_calls) {
+                if (deltaToolCalls && deltaToolCalls.length) {
                   writeEvent({
                     id,
                     object: "chat.completion.chunk",
                     created,
                     model: modelLabel,
-                    choices: [{ index: 0, delta: { tool_calls: parsed.tool_calls }, finish_reason: null }],
+                    choices: [{ index: 0, delta: { tool_calls: deltaToolCalls }, finish_reason: null }],
                   });
                 }
               } catch {
