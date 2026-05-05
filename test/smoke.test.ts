@@ -150,6 +150,84 @@ describe("OpenAI bridge smoke tests", () => {
     expect(text).toMatch(/"finish_reason":"tool_calls"/);
   });
 
+  it("chat: reroutes to vision model when image_url part is present and alias was text-only", async () => {
+    let calledModel = "";
+    (env as any).AI = {
+      run: async (model: string, _input: any) => {
+        calledModel = model;
+        return { response: "saw the image" };
+      },
+    };
+    const res = await SELF.fetch("https://example.com/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt-4o",
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "what is this?" },
+              { type: "image_url", image_url: { url: "https://example.com/cat.jpg" } },
+            ],
+          },
+        ],
+      }),
+    });
+    expect(res.status).toBe(200);
+    expect(calledModel).toBe("@cf/meta/llama-3.2-11b-vision-instruct");
+  });
+
+  it("chat: keeps caller's vision model when one was already requested", async () => {
+    let calledModel = "";
+    (env as any).AI = {
+      run: async (model: string) => {
+        calledModel = model;
+        return { response: "ok" };
+      },
+    };
+    await SELF.fetch("https://example.com/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "@cf/llava-hf/llava-1.5-7b-hf",
+        messages: [
+          { role: "user", content: [{ type: "image_url", image_url: { url: "x" } }] },
+        ],
+      }),
+    });
+    expect(calledModel).toBe("@cf/llava-hf/llava-1.5-7b-hf");
+  });
+
+  it("responses: reroutes to vision model on input_image part", async () => {
+    let calledModel = "";
+    (env as any).AI = {
+      run: async (model: string) => {
+        calledModel = model;
+        return { response: "saw image" };
+      },
+    };
+    const res = await SELF.fetch("https://example.com/v1/responses", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt-4o",
+        input: [
+          {
+            type: "message",
+            role: "user",
+            content: [
+              { type: "input_text", text: "describe" },
+              { type: "input_image", image_url: { url: "https://example.com/x.jpg" } },
+            ],
+          },
+        ],
+      }),
+    });
+    expect(res.status).toBe(200);
+    expect(calledModel).toBe("@cf/meta/llama-3.2-11b-vision-instruct");
+  });
+
   it("rejects requests when API_KEY is set and bearer is missing", async () => {
     (env as any).API_KEY = "sk-test";
     const res = await SELF.fetch("https://example.com/v1/models");

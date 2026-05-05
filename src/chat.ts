@@ -1,6 +1,7 @@
 import type { Context } from "hono";
 import { runAI } from "./ai-client";
-import { resolveChatModel } from "./mapping";
+import { inlineImageUrls } from "./image-inline";
+import { isVisionModel, resolveChatModel, VISION_DEFAULT_MODEL } from "./mapping";
 import { createToolCallStreamParser } from "./tool-call-parser";
 import type { ChatCompletionRequest, ChatMessage, Env } from "./types";
 
@@ -52,6 +53,14 @@ function adaptMessages(messages: ChatMessage[]) {
   }));
 }
 
+function messagesContainImage(messages: ChatMessage[]): boolean {
+  for (const m of messages) {
+    const c = m.content;
+    if (Array.isArray(c) && c.some((p) => p && (p as any).type === "image_url")) return true;
+  }
+  return false;
+}
+
 function generateId(): string {
   return "chatcmpl-" + crypto.randomUUID().replace(/-/g, "").slice(0, 24);
 }
@@ -68,11 +77,24 @@ export async function handleChatCompletions(c: Context<{ Bindings: Env }>) {
     return c.json({ error: { message: "`messages` is required", type: "invalid_request_error" } }, 400);
   }
 
-  const model = resolveChatModel(body.model, c.env.DEFAULT_CHAT_MODEL ?? "@cf/meta/llama-3.3-70b-instruct-fp8-fast");
+  let model = resolveChatModel(body.model, c.env.DEFAULT_CHAT_MODEL ?? "@cf/meta/llama-3.3-70b-instruct-fp8-fast");
+  // Auto-route to a vision model when the request contains image_url parts
+  // and the resolved model isn't vision-capable. The caller's `body.model`
+  // (e.g. "gpt-4o") still appears in the response so OpenAI clients see what
+  // they sent.
+  const hasImage = messagesContainImage(body.messages);
+  if (hasImage && !isVisionModel(model)) {
+    model = VISION_DEFAULT_MODEL;
+  }
   const stream = body.stream === true;
 
+  const adaptedMessages = adaptMessages(body.messages);
+  // Workers AI vision models accept only data: URIs. Fetch any remote
+  // image_url and inline it as base64 before the upstream call.
+  if (hasImage) await inlineImageUrls(adaptedMessages);
+
   const aiInput: Record<string, unknown> = {
-    messages: adaptMessages(body.messages),
+    messages: adaptedMessages,
     stream,
   };
   if (typeof body.temperature === "number") aiInput.temperature = body.temperature;

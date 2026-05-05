@@ -1,6 +1,7 @@
 import type { Context } from "hono";
 import { runAI } from "./ai-client";
-import { resolveChatModel } from "./mapping";
+import { inlineImageUrls } from "./image-inline";
+import { isVisionModel, resolveChatModel, VISION_DEFAULT_MODEL } from "./mapping";
 import { createToolCallStreamParser } from "./tool-call-parser";
 import type { Env } from "./types";
 
@@ -39,17 +40,55 @@ interface ResponsesRequest {
   store?: boolean;
 }
 
-function flattenResponsesContent(content: ResponsesInputItem["content"]): string {
+// Adapt Responses-API content into the chat.completions content shape that
+// Workers AI expects. Plain text collapses to a string; if any image parts
+// are present we keep the multipart array and convert input_image →
+// image_url so vision models receive it intact.
+function adaptResponsesContent(content: ResponsesInputItem["content"]): string | unknown[] {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
-  return content
-    .map((p) => {
-      // Responses API uses `input_text` / `output_text` / `input_image`.
-      if ((p.type === "input_text" || p.type === "output_text" || p.type === "text") && p.text) return p.text;
-      return "";
-    })
-    .filter(Boolean)
-    .join("\n");
+
+  const hasImage = content.some(
+    (p) => p && (p.type === "input_image" || p.type === "image_url" || (p as any).image_url),
+  );
+  if (!hasImage) {
+    return content
+      .map((p) => {
+        if ((p.type === "input_text" || p.type === "output_text" || p.type === "text") && p.text) return p.text;
+        return "";
+      })
+      .filter(Boolean)
+      .join("\n");
+  }
+
+  // Multipart with images — emit chat.completions parts.
+  const out: unknown[] = [];
+  for (const p of content) {
+    if (!p) continue;
+    if ((p.type === "input_text" || p.type === "output_text" || p.type === "text") && p.text) {
+      out.push({ type: "text", text: p.text });
+      continue;
+    }
+    if (p.type === "input_image" || p.type === "image_url" || (p as any).image_url) {
+      const raw = (p as any).image_url;
+      const url = typeof raw === "string" ? raw : raw?.url;
+      if (url) out.push({ type: "image_url", image_url: { url } });
+      continue;
+    }
+  }
+  return out;
+}
+
+function inputContainsImage(input: ResponsesRequest["input"]): boolean {
+  if (typeof input === "string" || !Array.isArray(input)) return false;
+  for (const item of input as any[]) {
+    if (!item || typeof item !== "object") continue;
+    const c = item.content;
+    if (Array.isArray(c) && c.some((p: any) => p && (p.type === "input_image" || p.type === "image_url" || p.image_url))) {
+      return true;
+    }
+  }
+  return false;
 }
 
 // Responses API allows several item types in the `input` array:
@@ -63,7 +102,7 @@ function flattenResponsesContent(content: ResponsesInputItem["content"]): string
 //   function_call_output   → { role:"tool", tool_call_id, content }
 type ChatTurn = {
   role: string;
-  content?: string;
+  content?: string | unknown[];
   tool_calls?: unknown[];
   tool_call_id?: string;
 };
@@ -112,9 +151,9 @@ function adaptInputToMessages(req: ResponsesRequest): ChatTurn[] {
 
     // Default: treat as a message item (with or without explicit type:"message").
     const role = item.role === "developer" ? "system" : (item.role ?? "user");
-    const content = flattenResponsesContent(item.content);
-    if (content || item.role === "assistant") {
-      messages.push({ role, content });
+    const content = adaptResponsesContent(item.content);
+    if ((typeof content === "string" && content) || (Array.isArray(content) && content.length > 0) || item.role === "assistant") {
+      messages.push({ role, content: content as any });
     }
   }
   return messages;
@@ -200,8 +239,16 @@ export async function handleResponses(c: Context<{ Bindings: Env }>) {
     return c.json({ error: { message: "`input` is required", type: "invalid_request_error" } }, 400);
   }
 
-  const model = resolveChatModel(body.model, c.env.DEFAULT_CHAT_MODEL ?? "@cf/meta/llama-3.3-70b-instruct-fp8-fast");
+  let model = resolveChatModel(body.model, c.env.DEFAULT_CHAT_MODEL ?? "@cf/meta/llama-3.3-70b-instruct-fp8-fast");
+  // Auto-route to a vision model when input items include image parts and
+  // the resolved model can't handle them. Caller's body.model is preserved
+  // in the response so OpenAI clients still see what they sent.
+  const hasImage = inputContainsImage(body.input);
+  if (hasImage && !isVisionModel(model)) {
+    model = VISION_DEFAULT_MODEL;
+  }
   const messages = adaptInputToMessages(body);
+  if (hasImage) await inlineImageUrls(messages);
   const stream = body.stream === true;
 
   const aiInput: Record<string, unknown> = { messages, stream };

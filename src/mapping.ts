@@ -24,6 +24,21 @@ const EMBEDDING_ALIASES: Record<string, string> = {
 // callers can target any model the account has access to.
 const NATIVE_ID_RE = /^@[a-z0-9-]+\//i;
 
+// Default vision-capable model on Workers AI. Used when the caller asks
+// for a text-only model but sends image_url / input_image content parts.
+export const VISION_DEFAULT_MODEL = "@cf/meta/llama-3.2-11b-vision-instruct";
+
+// Names containing any of these substrings are treated as vision-capable
+// and don't get rerouted. Keeps us forward-compatible with new vision
+// model releases without an explicit allowlist.
+const VISION_ID_HINTS = ["vision", "llava", "uform", "vlm"];
+
+export function isVisionModel(id: string | undefined | null): boolean {
+  if (!id) return false;
+  const lower = id.toLowerCase();
+  return VISION_ID_HINTS.some((hint) => lower.includes(hint));
+}
+
 export function resolveChatModel(requested: string, fallback: string): string {
   if (!requested) return fallback;
   if (NATIVE_ID_RE.test(requested)) return requested;
