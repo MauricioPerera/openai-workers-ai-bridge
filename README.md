@@ -2,9 +2,7 @@
 
 OpenAI-compatible API for **Cloudflare Workers AI**. Deploy this Worker to your own Cloudflare account and you get a drop-in OpenAI endpoint that lets **n8n**, **LibreChat**, **Open WebUI**, **Cursor**, **Continue.dev**, the OpenAI SDKs, or any tool that speaks the OpenAI API talk to Workers AI models (Llama 3, Mistral, Qwen, Gemma, DeepSeek, BGE embeddings, …).
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/YOUR_USERNAME/openai-workers-ai-bridge)
-
-> Replace `YOUR_USERNAME/openai-workers-ai-bridge` in the badge URL above with your fork's path before publishing.
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/MauricioPerera/openai-workers-ai-bridge)
 
 ## What it does
 
@@ -38,7 +36,7 @@ Your endpoint is now live at `https://openai-workers-ai-bridge.<your-subdomain>.
 ## Deploy from the CLI
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/openai-workers-ai-bridge.git
+git clone https://github.com/MauricioPerera/openai-workers-ai-bridge.git
 cd openai-workers-ai-bridge
 npm install
 npx wrangler login
