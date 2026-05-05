@@ -49,16 +49,41 @@ describe("OpenAI bridge smoke tests", () => {
     expect(body.choices[0].message.content).toContain("echo: ping");
   });
 
-  it("POST /v1/embeddings returns vector list", async () => {
+  it("POST /v1/embeddings returns vector list (encoding_format=float)", async () => {
     const res = await SELF.fetch("https://example.com/v1/embeddings", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model: "text-embedding-3-small", input: ["a", "b"] }),
+      body: JSON.stringify({
+        model: "text-embedding-3-small",
+        input: ["a", "b"],
+        encoding_format: "float",
+      }),
     });
     expect(res.status).toBe(200);
     const body = await res.json<any>();
     expect(body.data).toHaveLength(2);
     expect(body.data[0].embedding).toEqual([0.1, 0.2, 0.3]);
+  });
+
+  it("POST /v1/embeddings defaults to base64 (OpenAI SDK wire format)", async () => {
+    const res = await SELF.fetch("https://example.com/v1/embeddings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "text-embedding-3-small", input: "x" }),
+    });
+    const body = await res.json<any>();
+    const b64 = body.data[0].embedding;
+    expect(typeof b64).toBe("string");
+    // Decode and verify the bytes round-trip back into [0.1, 0.2, 0.3] floats.
+    const bin = atob(b64);
+    const buf = new ArrayBuffer(bin.length);
+    const bytes = new Uint8Array(buf);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const floats = Array.from(new Float32Array(buf));
+    expect(floats).toHaveLength(3);
+    expect(floats[0]).toBeCloseTo(0.1, 6);
+    expect(floats[1]).toBeCloseTo(0.2, 6);
+    expect(floats[2]).toBeCloseTo(0.3, 6);
   });
 
   it("POST /v1/responses returns Responses-API-shaped output", async () => {
@@ -301,7 +326,11 @@ describe("OpenAI bridge smoke tests", () => {
         return { data: texts.map(() => [0.5, 0.5, 0.5]) };
       },
     };
-    const payload = JSON.stringify({ model: "text-embedding-3-small", input: "deterministic phrase" });
+    const payload = JSON.stringify({
+      model: "text-embedding-3-small",
+      input: "deterministic phrase",
+      encoding_format: "float",
+    });
     const headers = { "Content-Type": "application/json" };
     const a = await (await SELF.fetch("https://example.com/v1/embeddings", { method: "POST", headers, body: payload })).json<any>();
     const b = await (await SELF.fetch("https://example.com/v1/embeddings", { method: "POST", headers, body: payload })).json<any>();
@@ -331,7 +360,11 @@ describe("OpenAI bridge smoke tests", () => {
     const res = await SELF.fetch("https://example.com/v1/embeddings", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model: "text-embedding-3-small", input: ["a", "b", "c"] }),
+      body: JSON.stringify({
+        model: "text-embedding-3-small",
+        input: ["a", "b", "c"],
+        encoding_format: "float",
+      }),
     });
     const body = await res.json<any>();
     expect(body.data).toHaveLength(3);
@@ -351,7 +384,12 @@ describe("OpenAI bridge smoke tests", () => {
     const res = await SELF.fetch("https://example.com/v1/embeddings", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model: "embeddinggemma", input: "x", dimensions: 256 }),
+      body: JSON.stringify({
+        model: "embeddinggemma",
+        input: "x",
+        dimensions: 256,
+        encoding_format: "float",
+      }),
     });
     expect(res.status).toBe(200);
     const body = await res.json<any>();

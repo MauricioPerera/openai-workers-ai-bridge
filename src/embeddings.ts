@@ -17,6 +17,24 @@ function truncateAndRenormalize(vec: number[], dim: number): number[] {
   return head;
 }
 
+// OpenAI's official Node SDK defaults to `encoding_format: "base64"` and
+// expects the server to return `embedding` as a base64-encoded little-endian
+// Float32 buffer rather than a JSON number array. If we don't honour that,
+// the SDK happily decodes the literal "[-0.305, ..." JSON as base64 and
+// produces garbage. Match the spec.
+function vectorToBase64(vec: number[]): string {
+  const buf = new ArrayBuffer(vec.length * 4);
+  const view = new Float32Array(buf);
+  for (let i = 0; i < vec.length; i++) view[i] = vec[i];
+  const bytes = new Uint8Array(buf);
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
 // Embeddings are deterministic for a given (model, text) pair. Cache them in
 // the Worker's edge cache so repeated calls (RAG pipelines, n8n loops) don't
 // burn neurons on identical inputs. Cache by SHA-256 of model+text.
@@ -168,12 +186,17 @@ export async function handleEmbeddings(c: Context<{ Bindings: Env }>) {
     );
   }
 
+  // Default to base64 to match OpenAI's wire format. Clients that send
+  // `encoding_format: "float"` get a JSON number array; everyone else gets
+  // base64 (which the OpenAI Node SDK decodes back to Float32Array).
+  const wantFloat = body.encoding_format === "float";
+
   return c.json({
     object: "list",
     data: cached.map((embedding, index) => ({
       object: "embedding",
       index,
-      embedding: embedding ?? [],
+      embedding: wantFloat ? (embedding ?? []) : vectorToBase64(embedding ?? []),
     })),
     model: body.model || model,
     usage: {

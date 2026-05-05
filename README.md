@@ -215,6 +215,11 @@ Set vars in `wrangler.toml` (or the Cloudflare dashboard); set secrets with `wra
 - **TTS transcoding** — `response_format` is accepted but the bridge does not transcode codecs. melotts emits WAV, aura emits MP3, and the bridge serves whichever the model produced with the right `Content-Type`.
 - **n8n's HTTP_Request tool** exposes its parameters as `properties: {}` (an empty schema). Some models (Llama 70B, Hermes 7B, depending on the prompt) refuse to call no-arg tools and reply in text. Configure the tool with explicit properties or supply enough context in the user message.
 
+## Pairs well with
+
+- **[js-vector-store](https://github.com/MauricioPerera/js-vector-store)** — zero-dependency vanilla JS vector store with `matryoshkaSearch`, IVF, and 4 quantisations (Float32 / Int8 / 3-bit polar / 1-bit). Combines naturally with the bridge's `dimensions` parameter on `/v1/embeddings`: the bridge truncates and L2-renormalises Matryoshka vectors at request time, the store does multi-stage search across the same dimensional slices. See [`examples/rag-with-js-vector-store.mjs`](examples/rag-with-js-vector-store.mjs) for an end-to-end runnable example.
+- **[just-bash-data](https://github.com/MauricioPerera/just-bash-data)** — `db` (Mongo-style document store) and `vec` (vector similarity) commands for [`just-bash`](https://github.com/vercel-labs/just-bash) shell agents. Point its `vec` command at any embedding model the bridge serves to give an in-shell agent OpenAI-compatible RAG with Workers AI economics.
+
 ## Project layout
 
 ```
