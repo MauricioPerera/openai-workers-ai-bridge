@@ -1,6 +1,13 @@
 # OpenAI ↔ Workers AI Bridge
 
-Drop-in OpenAI-compatible API for **Cloudflare Workers AI**. Deploy this Worker to your own Cloudflare account and any tool that speaks the OpenAI API — **n8n**, **LibreChat**, **Open WebUI**, **Cursor**, **Continue.dev**, the OpenAI SDKs, LangChain — can talk to Workers AI models (Llama, Mistral, Hermes, Granite, DeepSeek, Whisper, Flux, BGE, …).
+Drop-in OpenAI-compatible API for **Cloudflare Workers AI**. Deploy this Worker to your own Cloudflare account and any tool that speaks the OpenAI API — **n8n**, **LibreChat**, **Open WebUI**, **Cursor**, **Continue.dev**, the OpenAI SDKs, **LangChain** — can talk to every Workers AI capability:
+
+- **Chat + tools + vision + reasoning** — Gemma 4 (26B), Llama 3.3 (70B), Llama 3.2-vision (11B), Granite 4, Mistral Small 3.1, Hermes-2-Pro, DeepSeek-R1, QwQ 32B, Qwen 3 30B, Qwen2.5-coder
+- **Embeddings + Matryoshka truncation** — EmbeddingGemma 300M, BGE (small / base / large / m3), Qwen3-embedding
+- **Speech-to-text + translation** — Whisper, Whisper-large-v3-turbo
+- **Text-to-speech** — MeloTTS (multilingual), Deepgram Aura-1 (English)
+- **Image generation** — Flux schnell, SDXL Lightning, Dreamshaper
+- **Moderation** — Llama Guard 3 (8B)
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/MauricioPerera/openai-workers-ai-bridge)
 
