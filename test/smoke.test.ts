@@ -427,6 +427,60 @@ describe("OpenAI bridge smoke tests", () => {
     expect(res.status).toBe(400);
   });
 
+  it("moderations: fails closed (502) when upstream errors", async () => {
+    (env as any).AI = {
+      run: async () => {
+        throw new Error("simulated upstream timeout");
+      },
+    };
+    const res = await SELF.fetch("https://example.com/v1/moderations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ input: "anything" }),
+    });
+    expect(res.status).toBe(502);
+    const body = await res.json<any>();
+    expect(body.error.code).toBe("moderation_unavailable");
+    // Importantly, the response does NOT pretend the input was safe.
+    expect(body.results).toBeUndefined();
+  });
+
+  it("images: detects PNG magic bytes and labels data URL as image/png", async () => {
+    // PNG file starts with 89 50 4E 47 0D 0A 1A 0A. Pad with one IHDR-ish byte.
+    const pngBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00]);
+    let binary = "";
+    for (const b of pngBytes) binary += String.fromCharCode(b);
+    const pngB64 = btoa(binary);
+    (env as any).AI = {
+      run: async () => ({ image: pngB64 }),
+    };
+    const res = await SELF.fetch("https://example.com/v1/images/generations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "dall-e-3", prompt: "x" }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json<any>();
+    expect(body.data[0].url).toMatch(/^data:image\/png;base64,/);
+  });
+
+  it("images: detects JPEG magic bytes and labels data URL as image/jpeg", async () => {
+    const jpegBytes = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]);
+    let binary = "";
+    for (const b of jpegBytes) binary += String.fromCharCode(b);
+    const jpegB64 = btoa(binary);
+    (env as any).AI = {
+      run: async () => ({ image: jpegB64 }),
+    };
+    const res = await SELF.fetch("https://example.com/v1/images/generations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "dall-e-3", prompt: "x" }),
+    });
+    const body = await res.json<any>();
+    expect(body.data[0].url).toMatch(/^data:image\/jpeg;base64,/);
+  });
+
   it("rejects requests when API_KEY is set and bearer is missing", async () => {
     (env as any).API_KEY = "sk-test";
     const res = await SELF.fetch("https://example.com/v1/models");

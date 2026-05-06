@@ -49,6 +49,26 @@ function bytesToBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
+// Detect image MIME type from the first few bytes of a base64-decoded
+// payload. Avoids hardcoding `image/jpeg` for everything — different models
+// hand back different formats and a future Workers AI model could switch.
+function detectImageMime(b64: string): string {
+  // Decode just enough bytes to inspect the magic. atob is fine for this:
+  // we only need ~12 chars (~9 bytes) which costs nothing.
+  let head = "";
+  try { head = atob(b64.slice(0, 16)); } catch { return "image/jpeg"; }
+  const b = (i: number) => head.charCodeAt(i) & 0xff;
+  // JPEG: FF D8 FF
+  if (b(0) === 0xff && b(1) === 0xd8 && b(2) === 0xff) return "image/jpeg";
+  // PNG: 89 50 4E 47 0D 0A 1A 0A
+  if (b(0) === 0x89 && b(1) === 0x50 && b(2) === 0x4e && b(3) === 0x47) return "image/png";
+  // GIF: 47 49 46 38 (GIF8)
+  if (b(0) === 0x47 && b(1) === 0x49 && b(2) === 0x46 && b(3) === 0x38) return "image/gif";
+  // WEBP: 52 49 46 46 ?? ?? ?? ?? 57 45 42 50  (RIFF....WEBP)
+  if (b(0) === 0x52 && b(1) === 0x49 && b(2) === 0x46 && b(3) === 0x46 && b(8) === 0x57 && b(9) === 0x45) return "image/webp";
+  return "image/jpeg";
+}
+
 // Workers AI image-gen models hand back results in two shapes:
 //   - { image: base64-string }  — Flux schnell
 //   - raw binary bytes          — SDXL Lightning, Dreamshaper
@@ -146,10 +166,13 @@ export async function handleImages(
   }
 
   // OpenAI default response_format is "url"; we don't run hosted storage so
-  // we surface a data: URL instead. b64_json is supported as-is.
+  // we surface a data: URL instead. b64_json is supported as-is. Detect
+  // the actual image MIME from magic bytes so the data URL labels e.g.
+  // PNG bytes as image/png and not image/jpeg.
   const wantUrl = body.response_format !== "b64_json";
+  const mime = detectImageMime(b64);
   const item = wantUrl
-    ? { url: `data:image/jpeg;base64,${b64}`, revised_prompt: body.prompt }
+    ? { url: `data:${mime};base64,${b64}`, revised_prompt: body.prompt }
     : { b64_json: b64, revised_prompt: body.prompt };
 
   return c.json({

@@ -35,9 +35,13 @@ function vectorToBase64(vec: number[]): string {
   return btoa(binary);
 }
 
-// Embeddings are deterministic for a given (model, text) pair. Cache them in
-// the Worker's edge cache so repeated calls (RAG pipelines, n8n loops) don't
-// burn neurons on identical inputs. Cache by SHA-256 of model+text.
+// Embeddings are deterministic for a given (model, text, dim) tuple. Cache
+// them in the Worker's edge cache so repeated calls (RAG pipelines, n8n
+// loops) don't burn neurons on identical inputs. The cache key is a SHA-256
+// of `${model}@${dim}\0${text}` (or just `${model}\0${text}` when no
+// truncation is requested) — different `dimensions` values land in
+// different buckets so a 256-dim Matryoshka request and a full-dim request
+// don't poison each other.
 const CACHE_TTL_SECONDS = 60 * 60 * 24 * 7; // one week
 
 async function vectorCacheKey(model: string, text: string): Promise<string> {

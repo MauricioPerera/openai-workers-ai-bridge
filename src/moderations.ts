@@ -93,23 +93,33 @@ export async function handleModerations(
     ? body.model
     : "@cf/meta/llama-guard-3-8b";
 
-  const results: ModerationResult[] = await Promise.all(
-    inputs.map(async (text) => {
-      try {
-        const r: any = await runAI(c.env, model, {
-          messages: [{ role: "user", content: text }],
-        });
-        const raw: string = r?.response ?? r?.choices?.[0]?.message?.content ?? "";
-        return classifyOne(raw);
-      } catch (err) {
-        return {
-          flagged: false,
-          categories: Object.fromEntries(OPENAI_CATEGORIES.map((c) => [c, false])),
-          category_scores: Object.fromEntries(OPENAI_CATEGORIES.map((c) => [c, 0])),
-        };
-      }
-    }),
-  );
+  // Moderation must fail closed: returning {flagged:false} on upstream
+  // error would tell the caller "this content is safe" when in fact we
+  // never inspected it. Surface the failure as a 502 so callers can
+  // pick their own policy (block, retry, fall back to another moderator).
+  const results: ModerationResult[] = [];
+  for (const text of inputs) {
+    try {
+      const r: any = await runAI(c.env, model, {
+        messages: [{ role: "user", content: text }],
+      });
+      const raw: string = r?.response ?? r?.choices?.[0]?.message?.content ?? "";
+      results.push(classifyOne(raw));
+    } catch (err) {
+      console.error("[/v1/moderations] upstream error:", (err as Error).message);
+      return c.json(
+        {
+          error: {
+            message:
+              "Moderation upstream failed. The bridge intentionally fails closed instead of returning `flagged:false`. Retry, switch to a different moderation model, or apply your own block policy.",
+            type: "upstream_error",
+            code: "moderation_unavailable",
+          },
+        },
+        502,
+      );
+    }
+  }
 
   return c.json({
     id: "modr_" + crypto.randomUUID().replace(/-/g, "").slice(0, 24),
