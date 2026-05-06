@@ -45,10 +45,13 @@ function isBlockedHostname(hostname: string): boolean {
   }
 
   // IPv6 literal — block ::1, fc00::/7 (ULA), fe80::/10 (link-local), ::
+  // The link-local range fe80::/10 corresponds to first-group prefixes
+  // fe80..febf (the second nibble must be 8, 9, a or b). The previous
+  // string-prefix check missed fe81..fe8f.
   if (h.includes(":")) {
     if (h === "::1" || h === "::") return true;
     if (h.startsWith("fc") || h.startsWith("fd")) return true;
-    if (h.startsWith("fe80:") || h.startsWith("fe9") || h.startsWith("fea") || h.startsWith("feb")) return true;
+    if (/^fe[89ab][0-9a-f]:/i.test(h)) return true;
     return false;
   }
 

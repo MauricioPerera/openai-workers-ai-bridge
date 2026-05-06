@@ -60,6 +60,20 @@ describe("image-inline SSRF blocklist", () => {
     expect(isBlockedHostname("fe80::1")).toBe(true);
   });
 
+  it("blocks the entire IPv6 link-local range fe80::/10 (regression for fe81-fe8f gap)", () => {
+    // fe80..febf — must all be blocked. The previous string-prefix check
+    // missed fe81..fe8f because it only matched "fe80:", "fe9*", "fea*", "feb*".
+    for (const second of ["80", "81", "85", "8f", "90", "9a", "a0", "af", "b0", "bf"]) {
+      const ip = `fe${second}::1`;
+      expect(isBlockedHostname(ip)).toBe(true);
+    }
+  });
+
+  it("does NOT block IPv6 outside fe80::/10 (fec0:: is deprecated site-local but not link-local)", () => {
+    expect(isBlockedHostname("fec0::1")).toBe(false);
+    expect(isBlockedHostname("fe7f::1")).toBe(false);
+  });
+
   it("allows public hostnames", () => {
     expect(isBlockedHostname("example.com")).toBe(false);
     expect(isBlockedHostname("upload.wikimedia.org")).toBe(false);

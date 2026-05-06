@@ -95,31 +95,37 @@ export async function handleModerations(
 
   // Moderation must fail closed: returning {flagged:false} on upstream
   // error would tell the caller "this content is safe" when in fact we
-  // never inspected it. Surface the failure as a 502 so callers can
-  // pick their own policy (block, retry, fall back to another moderator).
-  const results: ModerationResult[] = [];
-  for (const text of inputs) {
-    try {
-      const r: any = await runAI(c.env, model, {
-        messages: [{ role: "user", content: text }],
-      });
-      const raw: string = r?.response ?? r?.choices?.[0]?.message?.content ?? "";
-      results.push(classifyOne(raw));
-    } catch (err) {
-      console.error("[/v1/moderations] upstream error:", (err as Error).message);
-      return c.json(
-        {
-          error: {
-            message:
-              "Moderation upstream failed. The bridge intentionally fails closed instead of returning `flagged:false`. Retry, switch to a different moderation model, or apply your own block policy.",
-            type: "upstream_error",
-            code: "moderation_unavailable",
-          },
+  // never inspected it. We dispatch all inputs in parallel via
+  // Promise.allSettled (so batch latency stays at max(inputs), not sum)
+  // and surface the first failure as a 502 — fail-closed semantics
+  // preserved without the sequential-loop tax.
+  const settled = await Promise.allSettled(
+    inputs.map((text) =>
+      runAI(c.env, model, { messages: [{ role: "user", content: text }] }),
+    ),
+  );
+  const firstRejection = settled.find((s) => s.status === "rejected") as
+    | PromiseRejectedResult
+    | undefined;
+  if (firstRejection) {
+    console.error("[/v1/moderations] upstream error:", (firstRejection.reason as Error)?.message ?? firstRejection.reason);
+    return c.json(
+      {
+        error: {
+          message:
+            "Moderation upstream failed. The bridge intentionally fails closed instead of returning `flagged:false`. Retry, switch to a different moderation model, or apply your own block policy.",
+          type: "upstream_error",
+          code: "moderation_unavailable",
         },
-        502,
-      );
-    }
+      },
+      502,
+    );
   }
+  const results: ModerationResult[] = settled.map((s) => {
+    const r = (s as PromiseFulfilledResult<any>).value;
+    const raw: string = r?.response ?? r?.choices?.[0]?.message?.content ?? "";
+    return classifyOne(raw);
+  });
 
   return c.json({
     id: "modr_" + crypto.randomUUID().replace(/-/g, "").slice(0, 24),

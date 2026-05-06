@@ -64,8 +64,13 @@ function detectImageMime(b64: string): string {
   if (b(0) === 0x89 && b(1) === 0x50 && b(2) === 0x4e && b(3) === 0x47) return "image/png";
   // GIF: 47 49 46 38 (GIF8)
   if (b(0) === 0x47 && b(1) === 0x49 && b(2) === 0x46 && b(3) === 0x38) return "image/gif";
-  // WEBP: 52 49 46 46 ?? ?? ?? ?? 57 45 42 50  (RIFF....WEBP)
-  if (b(0) === 0x52 && b(1) === 0x49 && b(2) === 0x46 && b(3) === 0x46 && b(8) === 0x57 && b(9) === 0x45) return "image/webp";
+  // WEBP: 52 49 46 46 ?? ?? ?? ?? 57 45 42 50  (RIFF....WEBP). Other RIFF
+  // formats (WAVE / AVI / RMI) start the same way but never match WEBP at
+  // bytes 8-11, so we check all four to avoid a theoretical false positive.
+  if (
+    b(0) === 0x52 && b(1) === 0x49 && b(2) === 0x46 && b(3) === 0x46 &&
+    b(8) === 0x57 && b(9) === 0x45 && b(10) === 0x42 && b(11) === 0x50
+  ) return "image/webp";
   return "image/jpeg";
 }
 

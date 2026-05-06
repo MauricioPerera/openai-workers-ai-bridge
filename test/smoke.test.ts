@@ -464,6 +464,55 @@ describe("OpenAI bridge smoke tests", () => {
     expect(body.data[0].url).toMatch(/^data:image\/png;base64,/);
   });
 
+  it("images: detects WEBP magic bytes and labels data URL as image/webp", async () => {
+    // WEBP is RIFF (0x52 49 46 46) + 4 size bytes + "WEBP" (0x57 45 42 50)
+    const webp = new Uint8Array([
+      0x52, 0x49, 0x46, 0x46, 0x00, 0x00, 0x00, 0x00,
+      0x57, 0x45, 0x42, 0x50,
+    ]);
+    let binary = "";
+    for (const b of webp) binary += String.fromCharCode(b);
+    const webpB64 = btoa(binary);
+    (env as any).AI = {
+      run: async () => ({ image: webpB64 }),
+    };
+    const res = await SELF.fetch("https://example.com/v1/images/generations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "dall-e-3", prompt: "x" }),
+    });
+    const body = await res.json<any>();
+    expect(body.data[0].url).toMatch(/^data:image\/webp;base64,/);
+  });
+
+  it("moderations: dispatches a batch in parallel (latency ≈ max(inputs), not sum)", async () => {
+    let activeConcurrent = 0;
+    let peakConcurrent = 0;
+    (env as any).AI = {
+      run: async (_m: string, _input: any) => {
+        activeConcurrent++;
+        peakConcurrent = Math.max(peakConcurrent, activeConcurrent);
+        await new Promise((r) => setTimeout(r, 30));
+        activeConcurrent--;
+        return { response: "\nsafe" };
+      },
+    };
+    const t0 = Date.now();
+    const res = await SELF.fetch("https://example.com/v1/moderations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ input: ["a", "b", "c", "d", "e"] }),
+    });
+    const elapsed = Date.now() - t0;
+    expect(res.status).toBe(200);
+    const body = await res.json<any>();
+    expect(body.results).toHaveLength(5);
+    // 5 sequential calls × 30 ms = 150 ms. Parallel should be ~30 ms.
+    // Allow comfortable margin for the test runner; 100 ms still proves parallelism.
+    expect(elapsed).toBeLessThan(100);
+    expect(peakConcurrent).toBeGreaterThan(1);
+  });
+
   it("images: detects JPEG magic bytes and labels data URL as image/jpeg", async () => {
     const jpegBytes = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]);
     let binary = "";
